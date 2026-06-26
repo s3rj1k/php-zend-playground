@@ -13,7 +13,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?name=%7B%7B7*7%7D%7D"
@@ -29,7 +29,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?tpl=%7B%25%20if%20x%20%25%7D"
@@ -45,7 +45,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?tpl=%24%7B7*7%7D"
@@ -61,7 +61,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?data=hello-world"

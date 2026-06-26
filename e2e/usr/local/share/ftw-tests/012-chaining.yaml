@@ -13,7 +13,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/echo.php?chain_target=activate"
@@ -30,7 +30,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/echo.php?other=value"
@@ -47,7 +47,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/echo.php?chain_target=activate"
@@ -63,7 +63,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/echo.php?forbidden_param=anything"
@@ -79,7 +79,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/echo.php?normal_param=value"

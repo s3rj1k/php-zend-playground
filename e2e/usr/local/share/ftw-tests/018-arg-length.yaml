@@ -13,7 +13,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             # 300 'a' characters
@@ -30,7 +30,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             # 100 'b' characters
@@ -47,7 +47,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?data=short"

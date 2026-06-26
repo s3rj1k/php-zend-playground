@@ -13,7 +13,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php?action=graphql"
@@ -31,7 +31,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php?action=graphql"
@@ -49,7 +49,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php?action=graphql"
@@ -67,7 +67,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php"
@@ -85,7 +85,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php"
@@ -103,7 +103,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php"
@@ -121,7 +121,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php"
@@ -139,7 +139,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php"
@@ -157,7 +157,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php"
@@ -175,7 +175,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php"
@@ -193,7 +193,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php"
@@ -211,7 +211,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php?action=graphql"
@@ -229,7 +229,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php"
@@ -247,7 +247,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/api.php"

@@ -13,7 +13,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?normal=true"
@@ -29,7 +29,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/post.php"

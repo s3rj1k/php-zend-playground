@@ -1,6 +1,6 @@
 name: ci
 
-# Pipeline against the nginx + php fpm (waf extension) stack in e2e/. Each
+# Pipeline against the HTTP bridge + php fpm (waf extension) stack in e2e/. Each
 # stage gates the next so a broken extension never reaches compile, e2e, or
 # bench. Triggers on push to main and on PRs to main.
 #
@@ -140,8 +140,8 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       # Builds the image, seeds the enabled rules config (debug on), brings up
-      # nginx+php fpm, and waits for readiness (any < 500 response). A 403 still
-      # counts as ready. WAF correctness is verified by the FTW suite below.
+      # the HTTP bridge + php fpm, and waits for readiness (any < 500 response).
+      # A 403 still counts as ready. WAF correctness is verified by the FTW suite.
       - name: Build + start stack
         run: ./run.sh up
 
@@ -154,8 +154,8 @@ jobs:
       - name: Dump container logs on failure
         if: failure()
         run: |
-          echo "===== nginx logs ====="
-          docker compose logs nginx || true
+          echo "===== bridge logs ====="
+          docker compose logs bridge || true
           echo "===== php-fpm logs ====="
           docker compose logs php-fpm || true
           echo "===== ModSecurity debug log ====="
@@ -169,7 +169,7 @@ jobs:
           mkdir -p logs
           docker compose exec -T php-fpm sh -c 'cat /var/log/modsec_debug.log 2>/dev/null' > logs/modsec_debug.log || true
           docker compose exec -T php-fpm sh -c 'cat /var/log/modsec_audit.log 2>/dev/null' > logs/modsec_audit.log || true
-          docker compose logs nginx > logs/nginx.log 2>&1 || true
+          docker compose logs bridge > logs/bridge.log 2>&1 || true
           docker compose logs php-fpm > logs/php-fpm.log 2>&1 || true
 
       - name: Upload logs artifact on failure
@@ -202,7 +202,7 @@ jobs:
 
       # `up` builds the image (cached, rebuilds when src/php_waf/ changes) and
       # starts the stack. Each bench step swaps its own config.
-      - name: Build + start nginx + php-fpm
+      - name: Build + start bridge + php-fpm
         run: ./run.sh up
 
       # Each scenario activates its config, restarts php fpm, runs the pre flight

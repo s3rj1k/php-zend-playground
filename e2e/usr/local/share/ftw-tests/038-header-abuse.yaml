@@ -13,7 +13,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -30,7 +30,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -47,7 +47,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -64,7 +64,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/post.php"
@@ -75,6 +75,8 @@ tests:
               Content-Length: "abc"
             data: "{}"
           output:
+            # The bridge forwards Content-Length="abc"; rule 1071 blocks a
+            # non-numeric Content-Length. The WAF is the verifier.
             status: 403
 
   - test_id: 5
@@ -83,7 +85,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -100,7 +102,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/post.php"
@@ -111,6 +113,9 @@ tests:
               Expect: "100-continue"
             data: "{}"
           output:
+            # The bridge forwards Expect: 100-continue (and does NOT emit an
+            # interim 100, which FTW would record as the status); rule 1073
+            # blocks. The WAF is the verifier.
             status: 403
 
   - test_id: 7
@@ -119,7 +124,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -136,7 +141,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/post.php"
@@ -154,7 +159,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -171,7 +176,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -188,7 +193,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/post.php"
@@ -207,7 +212,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -224,7 +229,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"

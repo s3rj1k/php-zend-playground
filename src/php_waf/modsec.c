@@ -4,6 +4,7 @@
 
 #include "SAPI.h"
 #include "ext/standard/head.h"
+#include "zend_compile.h"
 #include "modsec.h"
 #include "php_waf.h"
 #include <stdlib.h>
@@ -61,10 +62,11 @@ void waf_send_block_response(int status_code) {
 
     /* Emit the full HTTP response via original ub_write, bypassing the PHP
      * output layer and our hook. While a transaction is active waf_ub_write
-     * buffers into response_body, so headers would be swallowed and nginx would
-     * see only the HTML body as a header and return 502. Writing everything
-     * through original_ub_write keeps the Status, headers and body ordered for
-     * both the request phase block and the RSHUTDOWN block. */
+     * buffers into response_body, so headers would be swallowed and the HTTP
+     * front-end would see only the HTML body as a header and return 502.
+     * Writing everything through original_ub_write keeps the Status, headers
+     * and body ordered for both the request phase block and the RSHUTDOWN
+     * block. */
     size_t (*orig_write)(const char *, size_t) = waf_original_ub_write();
     if (orig_write == NULL) {
         orig_write = sapi_module.ub_write;
@@ -654,6 +656,16 @@ int waf_modsec_process_request(void) {
 
     if (!waf_modsec_is_enabled()) return 0;
 
+    /* Force the $_SERVER auto global to be populated NOW. Under
+     * auto_globals_jit=On (the PHP default) $_SERVER is realized lazily on the
+     * script's first reference to it, but waf_execute_ex fires on the first
+     * userland opcode, BEFORE that reference runs. Reading $_SERVER here
+     * otherwise yields a stale/empty symbol table, so every request looks like
+     * "GET /" from 127.0.0.1 with no User-Agent -> rule 1027 false-positives on
+     * benign endpoints that never touch $_SERVER directly. zend_is_auto_global_str
+     * runs the JIT callback to populate EG(symbol_table) regardless of jit. */
+    zend_is_auto_global_str(ZEND_STRL("_SERVER"));
+
     /* Create transaction */
     transaction = waf_modsec_transaction_begin();
     if (transaction == NULL) return 0;
@@ -827,19 +839,28 @@ int waf_modsec_process_response(void) {
         return intervention_status;
     }
 
-    /* Append response body if available */
-    if (WAF_G(response_body) != NULL && ZSTR_LEN(WAF_G(response_body)) > 0) {
+    /* Append response body if available, then evaluate phase 4 body rules.
+     * Skipped entirely when response body inspection is disabled
+     * (modsec_response_body_limit == 0): nothing was buffered, so there is no
+     * body to feed libmodsecurity and RESPONSE_BODY rules cannot fire. */
+    if (WAF_G(modsec_response_body_limit) != 0 &&
+        WAF_G(response_body) != NULL && ZSTR_LEN(WAF_G(response_body)) > 0) {
         waf_modsec_append_response_body(
             (const unsigned char *)ZSTR_VAL(WAF_G(response_body)),
             ZSTR_LEN(WAF_G(response_body)));
     }
 
     /* Process response body phase */
-    waf_modsec_process_response_body();
+    if (WAF_G(modsec_response_body_limit) != 0) {
+        waf_modsec_process_response_body();
+    }
 
     /* libmodsecurity may rewrite the body replace our buffer with the
-     * transaction's inspected version for RSHUTDOWN to flush. */
-    {
+     * transaction's inspected version for RSHUTDOWN to flush. Only meaningful
+     * when the body was NOT already streamed to the client on overflow
+     * (response_body_sent): once sent, a rewrite cannot be re-delivered, so
+     * skip it to avoid a pointless allocation that would never be flushed. */
+    if (!WAF_G(response_body_sent) && WAF_G(modsec_response_body_limit) != 0) {
         size_t new_len = 0;
         const char *new_body = waf_modsec_get_response_body(&new_len);
         if (new_body != NULL && new_len > 0) {

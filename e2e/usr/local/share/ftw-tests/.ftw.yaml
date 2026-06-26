@@ -10,7 +10,7 @@ meta:
 # Test environment settings
 settings:
   # Host to test against
-  host: "nginx"
+  host: "bridge"
   # Port to test against
   port: 80
   # Protocol (http or https)

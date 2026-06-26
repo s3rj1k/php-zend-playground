@@ -13,7 +13,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?btn=%3Cbutton%20onclick=alert(1)%3E"
@@ -29,7 +29,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?x=%3Cdiv%20onmouseover=alert(1)%3E"
@@ -45,7 +45,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?x=%3Cinput%20onfocus=alert(1)%3E"
@@ -61,7 +61,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?x=%3Cform%20onsubmit=alert(1)%3E"
@@ -77,7 +77,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?x=%3Cinput%20onkeyup=alert(1)%3E"
@@ -93,7 +93,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?x=data:text/html,%3Cscript%3Ealert(1)%3C/script%3E"
@@ -109,7 +109,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?x=%3Csvg%3E%3Cscript%3Ealert(1)%3C/script%3E%3C/svg%3E"
@@ -125,7 +125,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?q=less%20than%20and%20greater%20than"
@@ -141,7 +141,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?img=data:image/png;base64,iVBOR"

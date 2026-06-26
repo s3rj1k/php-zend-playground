@@ -13,7 +13,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -30,7 +30,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -46,7 +46,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -62,7 +62,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -78,7 +78,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -94,7 +94,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/admin/login.php"
@@ -102,4 +102,8 @@ tests:
               User-Agent: "FTW Test Client"
               Host: "localhost"
           output:
+            # The bridge routes non-existent .php to the index.php front
+            # controller (see fastcgi_bridge.py resolve_script), so PHP
+            # userland runs, the WAF hook fires, and rule 1006 blocks /admin/
+            # access with 403.
             status: 403

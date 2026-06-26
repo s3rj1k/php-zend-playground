@@ -27,14 +27,49 @@ size_t (*waf_original_ub_write(void))(const char *str, size_t str_len) {
   return original_ub_write;
 }
 
-/* SAPI ub_write hook capturing the response body for ModSecurity */
+/* SAPI ub_write hook capturing the response body for ModSecurity.
+ *
+ * Buffers the first `modsec_response_body_limit` bytes (default 10MB) of the
+ * response for inspection at RSHUTDOWN. Once the limit is reached the buffer is
+ * flushed to the client (to preserve output ordering) but RETAINED so it is
+ * still fed to libmodsecurity at RSHUTDOWN; `response_body_sent` marks this so
+ * RSHUTDOWN does not flush it a second time. All bytes beyond the limit stream
+ * straight through (only the leading prefix is inspected, to bound memory).
+ *
+ * A limit of 0 disables response body inspection entirely: nothing is buffered
+ * and everything passes through directly. */
 static size_t waf_ub_write(const char *str, size_t len) {
-  /* Capture the response body when the WAF is enabled with a transaction */
-  if (WAF_G(enabled) && WAF_G(modsec_transaction) != NULL) {
+  /* Buffer when the WAF is enabled and body inspection is on (limit != 0) AND
+   * we are under the fpm-fcgi SAPI. The fpm-fcgi gate mirrors RINIT/RSHUTDOWN:
+   * under CLI (e.g. `php -m`, `php -i`) waf.enabled may still be 1 (the conf.d
+   * INI is shared), but no transaction is ever created and RSHUTDOWN does NOT
+   * flush (it early-returns for non-fpm SAPIs). Buffering CLI output would then
+   * swallow it entirely (e.g. an empty `php -m`), so never buffer off-FPM.
+   *
+   * Buffering is NOT gated on an active transaction. Output emitted BEFORE the
+   * transaction is created must also be buffered: PHP reads POST data during
+   * sapi_activate (before waf_RINIT), so a malformed multipart body raises
+   * "Missing boundary in multipart/form-data POST data" as an E_WARNING that
+   * reaches ub_write before waf_execute_ex runs. If that warning streams to the
+   * client, it precedes a later WAF block response's Status header and corrupts
+   * the client's status-line parse (the request is framed as 200). Buffering it
+   * lets the block path (waf_execute_ex) discard it, or RSHUTDOWN flush it on
+   * allow. Do NOT key this on modsec_processed: that flag is reset in RINIT,
+   * which runs AFTER sapi_activate, so it is stale (==1 from the prior request)
+   * on warm workers and would let the warning leak on the 2nd+ request.
+   *
+   * The response_body_sent overflow path and RSHUTDOWN flush handle the rest. */
+  if (WAF_G(enabled) && WAF_G(modsec_response_body_limit) != 0 &&
+      strcmp(sapi_module.name, "fpm-fcgi") == 0) {
+
+    /* Buffer already flushed on overflow: pass everything through directly.
+     * The retained prefix is inspected at RSHUTDOWN but not re-delivered. */
+    if (WAF_G(response_body_sent)) {
+      return original_ub_write(str, len);
+    }
+
     size_t current_len = WAF_G(response_body) ? ZSTR_LEN(WAF_G(response_body)) : 0;
-    size_t max_size = WAF_G(modsec_response_body_limit) > 0
-        ? (size_t)WAF_G(modsec_response_body_limit)
-        : WAF_RESPONSE_BODY_MAX_SIZE;
+    size_t max_size = (size_t)WAF_G(modsec_response_body_limit);
 
     if (current_len < max_size) {
       size_t remaining = max_size - current_len;
@@ -51,17 +86,25 @@ static size_t waf_ub_write(const char *str, size_t len) {
         ZSTR_VAL(WAF_G(response_body))[current_len + to_buffer] = '\0';
       }
 
-      /* Flush overflow after draining the buffer to preserve order. */
       if (to_buffer < len) {
+        /* Buffer now full: flush the inspected prefix to the client to keep
+         * output ordered, RETAIN it for ModSecurity inspection at RSHUTDOWN
+         * (response_body_sent guards the double flush), then pass the overflow
+         * tail through directly. */
         original_ub_write(ZSTR_VAL(WAF_G(response_body)),
                           ZSTR_LEN(WAF_G(response_body)));
-        zend_string_release(WAF_G(response_body));
-        WAF_G(response_body) = NULL;
+        WAF_G(response_body_sent) = 1;
         return original_ub_write(str + to_buffer, len - to_buffer);
       }
       return len;
     }
-    /* Buffer full, pass through directly to preserve order. */
+
+    /* Buffer exactly full from a prior chunk (no overflow yet): flush it, mark
+     * sent, and pass this chunk through. */
+    original_ub_write(ZSTR_VAL(WAF_G(response_body)),
+                      ZSTR_LEN(WAF_G(response_body)));
+    WAF_G(response_body_sent) = 1;
+    return original_ub_write(str, len);
   }
 
   /* Send the output via the original ub_write */
@@ -138,6 +181,7 @@ void waf_init_globals(zend_waf_globals *globals) {
   globals->trust_proxy_headers = 0;
   globals->request_body = NULL;
   globals->response_body = NULL;
+  globals->response_body_sent = 0;
 
   /* ModSecurity globals */
   globals->modsec_rules_file = NULL;
@@ -257,8 +301,20 @@ PHP_RINIT_FUNCTION(waf) {
     return SUCCESS;
   }
 
+  /* Release any response body buffered BEFORE RINIT. sapi_activate (which runs
+   * before module RINITs) reads POST data; a malformed multipart body emits an
+   * E_WARNING through ub_write that waf_ub_write buffers into response_body.
+   * Nulling the pointer without releasing would leak that zend_string every
+   * request. The buffered bytes are not meaningful response output (they are a
+   * startup warning) and are intentionally dropped here; a later WAF block
+   * re-discards response_body, and the allow path flushes only post-RINIT
+   * output. */
+  if (WAF_G(response_body) != NULL) {
+    zend_string_release(WAF_G(response_body));
+  }
   WAF_G(request_body) = NULL;
   WAF_G(response_body) = NULL;
+  WAF_G(response_body_sent) = 0;
   WAF_G(modsec_transaction) = NULL;
   WAF_G(modsec_processed) = 0;
   WAF_G(transaction_id) = NULL;
@@ -306,9 +362,13 @@ PHP_RSHUTDOWN_FUNCTION(waf) {
       waf_modsec_process_logging();
       waf_modsec_transaction_end();
     } else {
-      /* Response allowed flush the buffered (possibly rewritten) body, sending
-       * headers first since ub_write buffering suppressed the implicit send. */
-      if (WAF_G(response_body) != NULL && ZSTR_LEN(WAF_G(response_body)) > 0) {
+      /* Response allowed: flush the buffered (possibly rewritten) body, sending
+       * headers first since ub_write buffering suppressed the implicit send.
+       * Skip the flush if the buffer was already streamed to the client on
+       * overflow (response_body_sent): the bytes already went out, in order, so
+       * only inspection (done in waf_modsec_process_response) is needed. */
+      if (!WAF_G(response_body_sent) &&
+          WAF_G(response_body) != NULL && ZSTR_LEN(WAF_G(response_body)) > 0) {
         sapi_send_headers();
         original_ub_write(ZSTR_VAL(WAF_G(response_body)),
                           ZSTR_LEN(WAF_G(response_body)));
@@ -317,8 +377,10 @@ PHP_RSHUTDOWN_FUNCTION(waf) {
       waf_modsec_transaction_end();
     }
   } else {
-    /* No transaction send the buffered response body */
-    if (WAF_G(response_body) != NULL && ZSTR_LEN(WAF_G(response_body)) > 0) {
+    /* No transaction: send the buffered response body, unless it was already
+     * streamed to the client on overflow. */
+    if (!WAF_G(response_body_sent) &&
+        WAF_G(response_body) != NULL && ZSTR_LEN(WAF_G(response_body)) > 0) {
       sapi_send_headers();
       original_ub_write(ZSTR_VAL(WAF_G(response_body)),
                         ZSTR_LEN(WAF_G(response_body)));

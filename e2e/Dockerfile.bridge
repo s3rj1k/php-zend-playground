@@ -1,0 +1,20 @@
+# Lenient HTTP -> FastCGI bridge that is the HTTP front-end for the WAF test
+# stack. See fastcgi_bridge.py for why this exists (a real web server's security
+# checks masked WAF behavior). python:3-alpine ships busybox wget (used by the
+# run.sh pre-flight probes), so no extra packages are needed.
+FROM python:3.12-alpine
+
+# Runs as root so it can bind port 80 (<1024) without extra capabilities. This
+# is a test-only harness, never exposed publicly.
+COPY fastcgi_bridge.py /app/fastcgi_bridge.py
+
+# Document root must match the php-fpm container (var/www/html bind mount).
+ENV DOC_ROOT=/var/www/html \
+    FPM_HOST=php-fpm \
+    FPM_PORT=9000 \
+    LISTEN_HOST=0.0.0.0 \
+    LISTEN_PORT=80
+
+EXPOSE 80
+
+CMD ["python3", "/app/fastcgi_bridge.py"]

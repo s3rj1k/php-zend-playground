@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WAF stack driver for the nginx + php fpm (waf extension) stack.
+# WAF stack driver for the HTTP bridge + php fpm (waf extension) stack.
 #
 # Brings the shared stack up, runs the FTW e2e suite, and runs the oha overhead
 # benchmark across scenarios (disabled, enabled norules, enabled rules,
@@ -128,41 +128,92 @@ EOF
     fi
 }
 
-wait_for_nginx() {
+wait_for_bridge() {
     log "Waiting for stack readiness"
     local _i
     # Readiness means the stack is serving, NOT that the WAF allows this probe.
-    # A 403 still proves nginx > php fpm > waf extension are wired up, so accept
-    # any non error response (< 500, not "000" = connection failure). WAF
+    # A 403 still proves bridge > php fpm > waf extension are wired up, so accept
+    # any non error response (< 500, not "0" = connection failure). WAF
     # correctness is verified separately by the pre flight and the FTW suite.
+    #
+    # Uses python3 (always present in the bridge image) instead of wget, since
+    # busybox wget's -S output parsing proved unreliable across versions.
     for _i in $(seq 1 60); do
         local code
-        code=$($DC exec -T nginx sh -c \
-            "wget -U 'WAF-bench-preflight' -S -O /dev/null 'http://nginx/index.php' 2>&1 || true" \
-            2>/dev/null | grep -oE 'HTTP/[0-9.]+ [0-9]+' | tail -1 | awk '{print $2}')
-        if [ -n "$code" ] && [ "$code" != "000" ] && [ "$code" -lt 500 ] 2>/dev/null; then
+        code=$($DC exec -T bridge python3 -c "
+import urllib.request, urllib.error
+req = urllib.request.Request('http://127.0.0.1:80/index.php',
+                              headers={'User-Agent':'WAF-bench-preflight'})
+try:
+    urllib.request.urlopen(req, timeout=5)
+    print(200)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception:
+    print(0)
+" 2>/dev/null) || code=""
+        if [ -n "$code" ] && [ "$code" != "0" ] && [ "$code" -lt 500 ] 2>/dev/null; then
             return 0
         fi
         sleep 1
     done
     echo "Stack did not become ready" >&2
-    $DC logs --tail=50 nginx php-fpm >&2 || true
+    echo "--- bridge container state ---" >&2
+    $DC ps -a bridge >&2 2>/dev/null || true
+    echo "--- bridge logs (tail 80) ---" >&2
+    $DC logs --tail=80 bridge >&2 2>/dev/null || true
+    echo "--- php-fpm logs (tail 30) ---" >&2
+    $DC logs --tail=30 php-fpm >&2 2>/dev/null || true
+    echo "--- bridge -> php-fpm connectivity ---" >&2
+    $DC exec -T bridge python3 -c "
+import socket
+try:
+    s = socket.create_connection(('php-fpm', 9000), timeout=5)
+    print('php-fpm:9000 reachable')
+    s.close()
+except Exception as e:
+    print(f'php-fpm:9000 UNREACHABLE: {e!r}')
+" >&2 2>/dev/null || true
+    echo "--- raw HTTP probe (via 127.0.0.1) ---" >&2
+    $DC exec -T bridge python3 -c "
+import urllib.request, urllib.error
+req = urllib.request.Request('http://127.0.0.1:80/index.php',
+                              headers={'User-Agent':'WAF-bench-preflight'})
+try:
+    r = urllib.request.urlopen(req, timeout=5)
+    print(f'status={r.status}')
+    print(r.read(500).decode('latin-1','replace'))
+except urllib.error.HTTPError as e:
+    print(f'status={e.code}')
+    print(e.read(500).decode('latin-1','replace'))
+except Exception as e:
+    print(f'CONNECT FAILED: {e!r}')
+" >&2 2>/dev/null || true
     return 1
 }
 
-# Fetch a URL via the nginx container (busybox wget) and print the final HTTP
-# status code. Must NOT run from the php fpm container when the WAF is enabled
-# its hooks interfere with the checker process's own I/O. nginx has no WAF and
-# simply proxies to php fpm where the request is inspected.
+# Fetch a URL via the bridge container (python3, always present) and print the
+# final HTTP status code. Must NOT run from the php fpm container when the WAF
+# is enabled its hooks interfere with the checker process's own I/O. The bridge
+# has no WAF and simply proxies to php fpm where the request is inspected.
 #
 # A benign User Agent is sent explicitly rule 1025 blocks automated tool UAs
-# (curl/, wget/, ...) and busybox wget's default UA is "Wget/..." which would
-# otherwise false positive the benign pre flight probe to 403 once rules load.
+# (curl/, wget/, Python-urllib/, ...) which would otherwise false positive the
+# benign pre flight probe to 403 once rules load.
 http_status() {
     local url="$1"
-    $DC exec -T nginx sh -c \
-        "wget -U 'WAF-bench-preflight' -S -O /dev/null '$url' 2>&1 || true" \
-        | grep -oE 'HTTP/[0-9.]+ [0-9]+' | tail -1 | awk '{print $2}'
+    $DC exec -T bridge python3 -c "
+import urllib.request, urllib.error
+req = urllib.request.Request('$url',
+                              headers={'User-Agent':'WAF-bench-preflight'})
+try:
+    urllib.request.urlopen(req, timeout=10)
+    print(200)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception:
+    print(0)
+" 2>/dev/null
 }
 
 # Verify the active scenario behaves correctly before benchmarking it
@@ -263,7 +314,7 @@ bench_scenario() {
     DURATION="$duration"
     WITH_DEBUG=0 activate_scenario "$scenario"
     $DC restart php-fpm >/dev/null
-    wait_for_nginx
+    wait_for_bridge
 
     local detail="$RESULTS_DIR/${scenario}.md"
     : > "$detail"
@@ -275,8 +326,8 @@ bench_scenario() {
     } >> "$detail"
 
     local pf_bs pf_ss
-    pf_bs=$(http_status "http://nginx/index.php?q=hello")
-    pf_ss=$(http_status "http://nginx/index.php?id=1%20UNION%20SELECT%20*%20FROM%20users")
+    pf_bs=$(http_status "http://bridge/index.php?q=hello")
+    pf_ss=$(http_status "http://bridge/index.php?id=1%20UNION%20SELECT%20*%20FROM%20users")
     if ! preflight "$scenario" "$pf_bs" "$pf_ss"; then
         echo "Pre-flight failed for $scenario (${PREFLIGHT_FAIL}) skipping benchmark" >&2
         echo "> pre-flight FAILED: benign=${pf_bs:-?}, sqli=${pf_ss:-?} ${PREFLIGHT_FAIL}" >> "$detail"
@@ -400,16 +451,21 @@ cmd_build() { log "Building images"; $DC build; }
 ensure_stack() {
     log "Building images (cached)"
     $DC build >/dev/null 2>&1 || { echo "docker compose build failed" >&2; return 1; }
-    if ! $DC ps php-fpm 2>/dev/null | grep -q -i running; then
-        # Seed runtime config BEFORE bringing containers up. If these files do
-        # not exist when docker compose starts, bind mounts create them as
-        # directories, which then fail to mount onto a file target.
-        WITH_DEBUG=1 activate_scenario enabled-rules
-        log "Starting nginx + php-fpm"
-        $DC up -d nginx php-fpm >/dev/null 2>&1 || true
-        $DC restart php-fpm >/dev/null
-        wait_for_nginx
+    # Seed runtime config BEFORE bringing containers up. If these files do not
+    # exist when docker compose starts, bind mounts create them as directories,
+    # which then fail to mount onto a file target.
+    WITH_DEBUG=1 activate_scenario enabled-rules
+    # Always (re)create both the bridge and php-fpm. `up -d` recreates a
+    # container only when its image/config changed, otherwise a no-op. Errors
+    # are NOT swallowed: a failed bridge bring-up must surface immediately
+    # (previously `|| true` hid the cause and the readiness loop just timed out).
+    log "Starting bridge + php-fpm"
+    if ! $DC up -d bridge php-fpm; then
+        echo "docker compose up failed" >&2
+        return 1
     fi
+    $DC restart php-fpm >/dev/null
+    wait_for_bridge
 }
 
 cmd_up() {
@@ -420,8 +476,15 @@ cmd_up() {
     # fresh with the enabled rules config (debug on for FTW diagnosis) and warm
     # up php fpm.
     ensure_stack
+    # Recreate the HTTP front-end (bridge) container if its image changed
+    # (compose detects the image hash and recreates; otherwise a no-op). Source
+    # edits to fastcgi_bridge.py require a recreate to take effect.
+    if ! $DC up -d bridge; then
+        echo "docker compose up (bridge) failed" >&2
+        return 1
+    fi
     $DC restart php-fpm >/dev/null
-    wait_for_nginx
+    wait_for_bridge
 }
 
 cmd_test() {

@@ -13,14 +13,14 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/headers.php"
             headers:
               User-Agent: "FTW Test Client"
               Host: "localhost"
-              Authorization: "Basic dXNlcjpwYXNzO2xz"
+              Authorization: "Basic foo;ls"
           output:
             status: 403
 
@@ -30,14 +30,14 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/headers.php"
             headers:
               User-Agent: "FTW Test Client"
               Host: "localhost"
-              Authorization: "Basic dXNlcjpgY29tbWFuZGA="
+              Authorization: "Basic foo`bar"
           output:
             status: 403
 
@@ -47,7 +47,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/headers.php"
@@ -64,14 +64,14 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/headers.php"
             headers:
               User-Agent: "FTW Test Client"
               Host: "localhost"
-              Authorization: "Basic dXNlcjpwYXNzfHdpZA=="
+              Authorization: "Basic foo|bar"
           output:
             status: 403
 
@@ -81,7 +81,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/headers.php"
@@ -98,7 +98,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/headers.php"

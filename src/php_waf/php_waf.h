@@ -33,6 +33,12 @@ zend_bool trust_proxy_headers;
 zend_string *request_body;
 zend_string *response_body;
 
+/* True once the response body buffer has been flushed to the client on
+ * overflow (response_body_limit reached). The retained buffer is still fed to
+ * ModSecurity for inspection at RSHUTDOWN, but it must not be flushed a second
+ * time (the bytes already streamed out, in order, during the request). */
+zend_bool response_body_sent;
+
 /* ModSecurity configuration */
 char *modsec_rules_file;
 char *modsec_rules_inline;

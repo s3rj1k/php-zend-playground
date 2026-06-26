@@ -113,14 +113,6 @@ int waf_modsec_append_request_body(const unsigned char *body, size_t len);
 /* Evaluate rules against the request body. */
 int waf_modsec_process_request_body(void);
 
-/* Add an argument (query string or POST parameter). */
-int waf_modsec_add_argument(const char *orig, const char *key,
-                            const char *value, size_t offset);
-
-/* Extract arguments from a buffer (query string or POST body). */
-int waf_modsec_extract_arguments(const char *orig, const char *buf,
-                                 size_t offset);
-
 /* ============================================================================
  * Response Headers Phase (Phase 5)
  * ============================================================================ */

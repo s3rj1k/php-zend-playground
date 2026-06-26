@@ -1,10 +1,12 @@
 name: waf
 
-# Shared nginx + php fpm (waf extension) stack. php fpm mounts a writable
+# Shared HTTP bridge + php fpm (waf extension) stack. php fpm mounts a writable
 # ./runtime/ directory whose layout mirrors the in container config paths
 # (usr/local/etc/php/conf.d/zz-waf.ini, etc/modsecurity/rules.conf, etc/modsecurity/crs),
 # so run.sh can swap scenarios (or seed the FTW config) without rebuilding.
-# nginx serves the PHP endpoints in ./var/www/html and proxies to php fpm.
+# The `bridge` service is a lenient HTTP -> FastCGI bridge (fastcgi_bridge.py),
+# NOT a web server; it serves the PHP endpoints in ./var/www/html and proxies to
+# php fpm.
 #
 # Two optional services run against this stack via compose profiles
 #   profile test   FTW + raw socket test runner (Dockerfile.ftw)
@@ -14,14 +16,21 @@ name: waf
 
 services:
 
-  nginx:
-    image: nginx:1.25-alpine
-    container_name: waf_nginx
+  # HTTP front-end. A lenient HTTP -> FastCGI bridge (fastcgi_bridge.py) that
+  # forwards raw request bytes to php-fpm WITHOUT the security checks a real
+  # web server used to perform (Host validation, URI %00 decoding, TRACE/CONNECT
+  # hardcoding, non-numeric CL rejection, interim 100-continue, /.ht deny,
+  # missing-.php 404s). The WAF (inside php-fpm) is now the verifier for every
+  # rule. See AGENTS.md "HTTP front-end is a dumb bridge".
+  bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    container_name: waf_bridge
     depends_on:
       - php-fpm
     volumes:
       - ./var/www/html:/var/www/html:ro
-      - ./etc/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
       - '127.0.0.1:8080:80'
     networks:
@@ -50,7 +59,7 @@ services:
       dockerfile: Dockerfile.ftw
     container_name: waf_test
     depends_on:
-      - nginx
+      - bridge
       - php-fpm
     volumes:
       - ./usr/local/share/ftw-tests:/tests:ro
@@ -58,7 +67,7 @@ services:
     networks:
       - waf_net
     environment:
-      - FTW_HOST=nginx
+      - FTW_HOST=bridge
       - FTW_PORT=80
     profiles:
       - test
@@ -68,7 +77,7 @@ services:
       context: .
       dockerfile: Dockerfile.oha
     depends_on:
-      - nginx
+      - bridge
     volumes:
       - ./scripts:/scripts:ro
     networks:

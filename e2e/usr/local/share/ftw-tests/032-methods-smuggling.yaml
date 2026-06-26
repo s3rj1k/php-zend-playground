@@ -13,7 +13,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "TRACE"
             uri: "/index.php"
@@ -21,6 +21,8 @@ tests:
               User-Agent: "FTW Test Client"
               Host: "localhost"
           output:
+            # The bridge accepts any method token and forwards REQUEST_METHOD
+            # to the WAF; rule 1055 blocks TRACE. The WAF is the verifier.
             status: 403
 
   - test_id: 2
@@ -29,7 +31,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "DELETE"
             uri: "/index.php"
@@ -45,7 +47,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "CONNECT"
             uri: "localhost:80"
@@ -53,6 +55,8 @@ tests:
               User-Agent: "FTW Test Client"
               Host: "localhost"
           output:
+            # The bridge forwards REQUEST_METHOD=CONNECT; rule 1057 blocks.
+            # The WAF is the verifier.
             status: 403
 
   - test_id: 4
@@ -61,7 +65,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/post.php"
@@ -79,7 +83,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -96,7 +100,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -113,7 +117,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -129,7 +133,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/post.php"
@@ -147,7 +151,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "GET"
             uri: "/index.php"
@@ -164,7 +168,7 @@ tests:
     stages:
       - stage:
           input:
-            dest_addr: "nginx"
+            dest_addr: "bridge"
             port: 80
             method: "POST"
             uri: "/post.php"
