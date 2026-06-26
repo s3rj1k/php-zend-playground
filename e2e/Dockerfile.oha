@@ -1,0 +1,5 @@
+# oha (https //github.com/hatoo/oha) Rust/tokio HTTP load generator with
+# constant throughput mode ( q), coordinated omission correction, and native
+# JSON output. Replaces wrk2 (abandoned). Official image, no build.
+FROM ghcr.io/hatoo/oha:latest
+ENTRYPOINT ["oha"]

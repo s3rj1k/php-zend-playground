@@ -1,0 +1,236 @@
+---
+# Test Header abuse and validation
+meta:
+  author: "PHP WAF Team"
+  description: "Header validation/abuse tests"
+  enabled: true
+  name: "038-header-abuse.yaml"
+
+tests:
+  - test_id: 1
+    test_title: "Block X-Forwarded-Host CRLF injection"
+    desc: "%0d%0a in X-Forwarded-Host triggers rule 1069"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "GET"
+            uri: "/index.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              X-Forwarded-Host: "evil%0d%0aSet-Cookie:x=1"
+          output:
+            status: 403
+
+  - test_id: 2
+    test_title: "Block Origin with javascript scheme"
+    desc: "javascript:// Origin triggers rule 1070"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "GET"
+            uri: "/index.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              Origin: "javascript://evil"
+          output:
+            status: 403
+
+  - test_id: 3
+    test_title: "Block Origin with data scheme"
+    desc: "data:// Origin triggers rule 1070"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "GET"
+            uri: "/index.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              Origin: "data://evil"
+          output:
+            status: 403
+
+  - test_id: 4
+    test_title: "Block invalid Content-Length"
+    desc: "Non-numeric Content-Length triggers rule 1071"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "POST"
+            uri: "/post.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              Content-Type: "application/json"
+              Content-Length: "abc"
+            data: "{}"
+          output:
+            status: 403
+
+  - test_id: 5
+    test_title: "Block Accept-Charset injection"
+    desc: "; in Accept-Charset triggers rule 1072"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "GET"
+            uri: "/index.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              Accept-Charset: "utf-8;injection"
+          output:
+            status: 403
+
+  - test_id: 6
+    test_title: "Block Expect 100-continue abuse"
+    desc: "Expect: 100-continue triggers rule 1073"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "POST"
+            uri: "/post.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              Content-Type: "application/json"
+              Expect: "100-continue"
+            data: "{}"
+          output:
+            status: 403
+
+  - test_id: 7
+    test_title: "Block excessive Range header (range bomb)"
+    desc: ">5 ranges triggers rule 1074"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "GET"
+            uri: "/index.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              Range: "bytes=0-1,2-3,4-5,6-7,8-9,10-11"
+          output:
+            status: 403
+
+  - test_id: 8
+    test_title: "Block multipart Content-Type without boundary"
+    desc: "multipart/form-data with no boundary triggers rule 1079"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "POST"
+            uri: "/post.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              Content-Type: "multipart/form-data"
+            data: "--boundary\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nv\r\n--boundary--"
+          output:
+            status: 403
+
+  - test_id: 9
+    test_title: "Allow normal X-Forwarded-Host"
+    desc: "Clean XFH passes rule 1069"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "GET"
+            uri: "/index.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              X-Forwarded-Host: "example.com"
+          output:
+            status: 200
+
+  - test_id: 10
+    test_title: "Allow normal https Origin"
+    desc: "https:// Origin passes rule 1070"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "GET"
+            uri: "/index.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              Origin: "https://example.com"
+          output:
+            status: 200
+
+  - test_id: 11
+    test_title: "Allow normal Content-Length"
+    desc: "Numeric Content-Length passes rule 1071"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "POST"
+            uri: "/post.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              Content-Type: "application/json"
+              Content-Length: "2"
+            data: "{}"
+          output:
+            status: 200
+
+  - test_id: 12
+    test_title: "Allow single Range header"
+    desc: "One range passes rule 1074"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "GET"
+            uri: "/index.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              Range: "bytes=0-1023"
+          output:
+            status: 200
+
+  - test_id: 13
+    test_title: "Allow normal Accept-Charset"
+    desc: "Clean Accept-Charset passes rule 1072"
+    stages:
+      - stage:
+          input:
+            dest_addr: "nginx"
+            port: 80
+            method: "GET"
+            uri: "/index.php"
+            headers:
+              User-Agent: "FTW Test Client"
+              Host: "localhost"
+              Accept-Charset: "utf-8"
+          output:
+            status: 200

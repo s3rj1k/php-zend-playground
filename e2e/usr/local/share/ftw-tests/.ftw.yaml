@@ -1,0 +1,23 @@
+# FTW Configuration for PHP WAF Testing
+# See https //github.com/coreruleset/ftw
+
+meta:
+  author: "PHP WAF Team"
+  description: "Test suite for PHP WAF ModSecurity integration"
+  enabled: true
+  name: "php-waf-tests"
+
+# Test environment settings
+settings:
+  # Host to test against
+  host: "nginx"
+  # Port to test against
+  port: 80
+  # Protocol (http or https)
+  protocol: "http"
+  # Timeout for requests (seconds)
+  timeout: 10
+  # Stop on first failure
+  stop_on_failure: false
+  # Log file to check for ModSecurity messages
+  log_file: "/var/log/modsec_debug.log"

@@ -1,0 +1,10 @@
+http://nginx/index.php?q=modsecurity+overview&page=1
+http://nginx/index.php?q=modsecurity+overview&page=2
+http://nginx/index.php?category=books&page=3
+http://nginx/index.php?slug=how-to-configure-waf
+http://nginx/index.php?word=community
+http://nginx/index.php?topic=system_design
+http://nginx/index.php?id=42
+http://nginx/index.php?file=docs/readme.txt
+http://nginx/echo.php?foo=bar
+http://nginx/index.php?price=9.99

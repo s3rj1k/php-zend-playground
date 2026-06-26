@@ -1,0 +1,86 @@
+name: waf
+
+# Shared nginx + php fpm (waf extension) stack. php fpm mounts a writable
+# ./runtime/ directory whose layout mirrors the in container config paths
+# (usr/local/etc/php/conf.d/zz-waf.ini, etc/modsecurity/rules.conf, etc/modsecurity/crs),
+# so run.sh can swap scenarios (or seed the FTW config) without rebuilding.
+# nginx serves the PHP endpoints in ./var/www/html and proxies to php fpm.
+#
+# Two optional services run against this stack via compose profiles
+#   profile test   FTW + raw socket test runner (Dockerfile.ftw)
+#   profile bench  oha load generator (Dockerfile.oha)
+# Bring the base stack up with `run.sh up`, then `run.sh test` or
+# `run.sh bench <dur> <scenario>`.
+
+services:
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: waf_nginx
+    depends_on:
+      - php-fpm
+    volumes:
+      - ./var/www/html:/var/www/html:ro
+      - ./etc/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - '127.0.0.1:8080:80'
+    networks:
+      - waf_net
+    restart: unless-stopped
+
+  php-fpm:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+    container_name: waf_php
+    volumes:
+      - ./var/www/html:/var/www/html:ro
+      - ./runtime/usr/local/etc/php/conf.d/zz-waf.ini:/usr/local/etc/php/conf.d/zz-waf.ini:ro
+      - ./runtime/etc/modsecurity/rules.conf:/etc/modsecurity/rules.conf:ro
+      - ./runtime/etc/modsecurity/crs:/etc/modsecurity/crs:ro
+      - ./runtime/etc/modsecurity/crs-load.conf:/etc/modsecurity/crs-load.conf:ro
+      - modsec_logs:/var/log
+    networks:
+      - waf_net
+    restart: unless-stopped
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.ftw
+    container_name: waf_test
+    depends_on:
+      - nginx
+      - php-fpm
+    volumes:
+      - ./usr/local/share/ftw-tests:/tests:ro
+      - modsec_logs:/var/log:ro
+    networks:
+      - waf_net
+    environment:
+      - FTW_HOST=nginx
+      - FTW_PORT=80
+    profiles:
+      - test
+
+  oha:
+    build:
+      context: .
+      dockerfile: Dockerfile.oha
+    depends_on:
+      - nginx
+    volumes:
+      - ./scripts:/scripts:ro
+    networks:
+      - waf_net
+    profiles:
+      - bench
+    # Overridden by run.sh per scenario default is a no op so `up` alone is safe.
+    command: ["--version"]
+
+networks:
+  waf_net:
+    driver: bridge
+
+volumes:
+  modsec_logs:
