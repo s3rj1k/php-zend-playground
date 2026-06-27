@@ -9,11 +9,16 @@ FROM python:3.12-alpine
 COPY fastcgi_bridge.py /app/fastcgi_bridge.py
 
 # Document root must match the php-fpm container (var/www/html bind mount).
+# PROCESSES: number of preforked workers (default = visible CPU count). Each is
+# a separate process with its own GIL + FPM pool, accepting via SO_REUSEPORT —
+# this is what lets the Python bridge approach nginx throughput (one GIL alone
+# caps at ~50%). Bump via docker compose env if the container sees too few CPUs.
 ENV DOC_ROOT=/var/www/html \
     FPM_HOST=php-fpm \
     FPM_PORT=9000 \
     LISTEN_HOST=0.0.0.0 \
-    LISTEN_PORT=80
+    LISTEN_PORT=80 \
+    PROCESSES=4
 
 EXPOSE 80
 

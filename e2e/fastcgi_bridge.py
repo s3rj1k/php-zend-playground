@@ -46,6 +46,7 @@ import os
 import socket
 import struct
 import sys
+import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
@@ -57,12 +58,21 @@ LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "80"))
 INDEX_FILE = "index.php"
 
-# Concurrency knobs. BRIDGE_WORKERS caps the thread pool (one worker per
-# in-flight client connection); FPM_POOL_MAX caps persistent FPM connections.
-# FPM_POOL_MAX should be <= php-fpm pm.max_children (see etc/php-fpm.d/zz-pool.conf)
-# or extra connections just queue inside FPM.
-BRIDGE_WORKERS = int(os.environ.get("BRIDGE_WORKERS", "128"))
-FPM_POOL_MAX = int(os.environ.get("FPM_POOL_MAX", "64"))
+# Concurrency knobs.
+#   PROCESSES  — number of preforked worker processes. Each has its OWN Python
+#     GIL + FPM pool and accepts on the same port via SO_REUSEPORT (kernel
+#     load-balances accepts, like nginx). This is the key to throughput: one
+#     GIL serialises the CPU-bound parse/build across threads, so a single
+#     process caps out at ~50% of nginx; N processes use N cores and recover
+#     most of the gap. Default = number of CPUs (at least 2).
+#   BRIDGE_WORKERS — threads PER process (overlaps I/O within one GIL).
+#   FPM_POOL_MAX — persistent FPM conns PER process. Total across all processes
+#     must be <= php-fpm pm.max_children, so default scales it down per process.
+PROCESSES = max(1, int(os.environ.get("PROCESSES", str(os.cpu_count() or 2))))
+BRIDGE_WORKERS = int(os.environ.get("BRIDGE_WORKERS", "64"))
+# Keep total FPM conns <= max_children (64 by default, see etc/php-fpm.d).
+FPM_TOTAL = int(os.environ.get("FPM_TOTAL", "64"))
+FPM_POOL_MAX = max(1, FPM_TOTAL // PROCESSES)
 
 # FastCGI 1.0 record types
 FCGI_VERSION = 1
@@ -225,8 +235,9 @@ class FpmPool:
             self._cond.notify_all()
 
 
-# A single shared pool for the whole process.
-_fpm_pool = FpmPool(FPM_POOL_MAX)
+# NOTE: the FPM pool is created per-worker-process in worker_main(), NOT here
+# as a module global — each preforked process must own its own pool (and its
+# own GIL). See main()/worker_main().
 
 
 def fcgi_request(pool: FpmPool, params: dict, body: bytes) -> tuple[bytes, bytes]:
@@ -602,7 +613,7 @@ _INTERNAL_ERROR = (
 )
 
 
-def handle(conn, addr):
+def handle(conn, addr, pool: FpmPool):
     """Serve one client connection, looping over keep-alive requests."""
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     try:
@@ -616,7 +627,7 @@ def handle(conn, addr):
             try:
                 params = build_params(method, target, version, headers, body,
                                       addr[0], addr[1])
-                stdout, stderr = fcgi_request(_fpm_pool, params, body)
+                stdout, stderr = fcgi_request(pool, params, body)
             except Exception as exc:
                 # Upstream failure (FPM down / stale conn / timeout). Close the
                 # client connection — keeping it alive would just fail again.
@@ -650,22 +661,76 @@ def handle(conn, addr):
         conn.close()
 
 
-def main():
+def _listen_socket() -> socket.socket:
+    """A listen socket with SO_REUSEPORT so multiple preforked processes can
+    accept on the same port (the kernel load-balances incoming connections
+    across them — nginx's model)."""
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
+        try:
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except OSError:
+            pass  # not supported on this kernel; prefork still works (herd)
     srv.bind((LISTEN_HOST, LISTEN_PORT))
     srv.listen(LISTEN_BACKLOG)
-    sys.stderr.write(
-        f"[bridge] listening on {LISTEN_HOST}:{LISTEN_PORT}, "
-        f"fastcgi {FPM_HOST}:{FPM_PORT}, docroot {DOC_ROOT}, "
-        f"workers={BRIDGE_WORKERS}, fpm_pool={FPM_POOL_MAX}\n")
+    return srv
+
+
+def worker_main(worker_id: int):
+    """One preforked worker process: own GIL, own FPM pool, own thread pool,
+    accepting on a SO_REUSEPORT listen socket."""
+    srv = _listen_socket()
+    pool = FpmPool(FPM_POOL_MAX)
     executor = ThreadPoolExecutor(max_workers=BRIDGE_WORKERS,
-                                  thread_name_prefix="bridge")
+                                  thread_name_prefix=f"bridge-{worker_id}")
+    sys.stderr.write(
+        f"[bridge:{os.getpid()}] worker {worker_id} up, "
+        f"threads={BRIDGE_WORKERS}, fpm_pool={FPM_POOL_MAX}\n")
     while True:
         conn, addr = srv.accept()
-        # submit returns immediately; if the pool is saturated the task queues
-        # (the TCP connection is already accepted, the client just waits).
-        executor.submit(handle, conn, addr)
+        executor.submit(handle, conn, addr, pool)
+
+
+def main():
+    if PROCESSES <= 1:
+        # Single process: behave like the original (no fork).
+        worker_main(0)
+        return
+    # Prefork N workers. Each rebinds the port via SO_REUSEPORT and accepts
+    # independently — the kernel spreads connections across them. This is the
+    # only way to use multiple CPU cores under the GIL.
+    sys.stderr.write(
+        f"[bridge] preforking {PROCESSES} workers on "
+        f"{LISTEN_HOST}:{LISTEN_PORT}, fastcgi {FPM_HOST}:{FPM_PORT}, "
+        f"docroot {DOC_ROOT}\n")
+    children = []
+    for i in range(PROCESSES):
+        pid = os.fork()
+        if pid == 0:
+            # Child: install default signal handling, run the accept loop.
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            try:
+                worker_main(i)
+            except KeyboardInterrupt:
+                pass
+            os._exit(0)
+        children.append(pid)
+    # Parent: reap children, forward SIGTERM to shut them down.
+    def _terminate(_sig, _frame):
+        for pid in children:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+    signal.signal(signal.SIGTERM, _terminate)
+    signal.signal(signal.SIGINT, _terminate)
+    try:
+        for pid in children:
+            os.waitpid(pid, 0)
+    except (KeyboardInterrupt, OSError):
+        pass
 
 
 if __name__ == "__main__":
