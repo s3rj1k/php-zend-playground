@@ -103,7 +103,7 @@ tests:
               Host: "localhost"
           output:
             # The bridge routes non-existent .php to the index.php front
-            # controller (see fastcgi_bridge.py resolve_script), so PHP
+            # controller (see bridge/main.go resolveScript), so PHP
             # userland runs, the WAF hook fires, and rule 1006 blocks /admin/
             # access with 403.
             status: 403

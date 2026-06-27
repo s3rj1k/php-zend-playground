@@ -1,25 +1,36 @@
-# Lenient HTTP -> FastCGI bridge that is the HTTP front-end for the WAF test
-# stack. See fastcgi_bridge.py for why this exists (a real web server's security
-# checks masked WAF behavior). python:3-alpine ships busybox wget (used by the
-# run.sh pre-flight probes), so no extra packages are needed.
-FROM python:3.12-alpine
+# Lenient HTTP -> FastCGI bridge that is the HTTP front-end for the WAF test/bench
+# stack. See bridge/main.go for why this exists (a real web server's security
+# checks masked WAF behavior). Built as a static Go binary for nginx-class
+# throughput with no GIL. The runtime image is alpine (busybox wget for run.sh
+# pre-flight probes).
+FROM golang:1.26-alpine AS builder
 
-# Runs as root so it can bind port 80 (<1024) without extra capabilities. This
-# is a test-only harness, never exposed publicly.
-COPY fastcgi_bridge.py /app/fastcgi_bridge.py
+WORKDIR /src
+COPY bridge/go.mod bridge/go.sum ./
+# Download deps listed in go.mod/go.sum. We use `go mod download` NOT `go mod
+# tidy`: tidy prunes requires that no .go file imports, and main.go isn't copied
+# yet at this layer, so tidy would delete the fcgi_client require and the build
+# below would fail to resolve the import. download never prunes, and this layer
+# stays cached across main.go edits.
+RUN go mod download
+COPY bridge/main.go ./
+RUN go build -trimpath -ldflags="-s -w" -o /waf-bridge .
+
+FROM alpine:3.24
+
+# Runs as root so it can bind port 80 (<1024) without extra capabilities.
+# Test-only harness, never exposed publicly.
+COPY --from=builder /waf-bridge /waf-bridge
 
 # Document root must match the php-fpm container (var/www/html bind mount).
-# PROCESSES: number of preforked workers (default = visible CPU count). Each is
-# a separate process with its own GIL + FPM pool, accepting via SO_REUSEPORT —
-# this is what lets the Python bridge approach nginx throughput (one GIL alone
-# caps at ~50%). Bump via docker compose env if the container sees too few CPUs.
+# FPM_TOTAL caps in-flight FPM conns (<= pm.max_children, see etc/php-fpm.d).
 ENV DOC_ROOT=/var/www/html \
     FPM_HOST=php-fpm \
     FPM_PORT=9000 \
     LISTEN_HOST=0.0.0.0 \
     LISTEN_PORT=80 \
-    PROCESSES=4
+    FPM_TOTAL=64
 
 EXPOSE 80
 
-CMD ["python3", "/app/fastcgi_bridge.py"]
+CMD ["/waf-bridge"]

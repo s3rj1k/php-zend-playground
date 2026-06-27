@@ -4,9 +4,9 @@ name: waf
 # ./runtime/ directory whose layout mirrors the in container config paths
 # (usr/local/etc/php/conf.d/zz-waf.ini, etc/modsecurity/rules.conf, etc/modsecurity/crs),
 # so run.sh can swap scenarios (or seed the FTW config) without rebuilding.
-# The `bridge` service is a lenient HTTP -> FastCGI bridge (fastcgi_bridge.py),
-# NOT a web server; it serves the PHP endpoints in ./var/www/html and proxies to
-# php fpm.
+# The `bridge` service is a lenient HTTP -> FastCGI bridge (Go, see
+# bridge/main.go), NOT a web server; it serves the PHP endpoints in
+# ./var/www/html and proxies to php-fpm.
 #
 # Two optional services run against this stack via compose profiles
 #   profile test   FTW + raw socket test runner (Dockerfile.ftw)
@@ -16,7 +16,7 @@ name: waf
 
 services:
 
-  # HTTP front-end. A lenient HTTP -> FastCGI bridge (fastcgi_bridge.py) that
+  # HTTP front-end. A lenient HTTP -> FastCGI bridge (Go, bridge/main.go) that
   # forwards raw request bytes to php-fpm WITHOUT the security checks a real
   # web server used to perform (Host validation, URI %00 decoding, TRACE/CONNECT
   # hardcoding, non-numeric CL rejection, interim 100-continue, /.ht deny,

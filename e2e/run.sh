@@ -133,26 +133,18 @@ wait_for_bridge() {
     local _i
     # Readiness means the stack is serving, NOT that the WAF allows this probe.
     # A 403 still proves bridge > php fpm > waf extension are wired up, so accept
-    # any non error response (< 500, not "0" = connection failure). WAF
+    # any non error response (< 500, not "000" = connection failure). WAF
     # correctness is verified separately by the pre flight and the FTW suite.
     #
-    # Uses python3 (always present in the bridge image) instead of wget, since
-    # busybox wget's -S output parsing proved unreliable across versions.
+    # Uses busybox wget (alpine ships it; the bridge image has no python3).
     for _i in $(seq 1 60); do
         local code
-        code=$($DC exec -T bridge python3 -c "
-import urllib.request, urllib.error
-req = urllib.request.Request('http://127.0.0.1:80/index.php',
-                              headers={'User-Agent':'WAF-bench-preflight'})
-try:
-    urllib.request.urlopen(req, timeout=5)
-    print(200)
-except urllib.error.HTTPError as e:
-    print(e.code)
-except Exception:
-    print(0)
-" 2>/dev/null) || code=""
-        if [ -n "$code" ] && [ "$code" != "0" ] && [ "$code" -lt 500 ] 2>/dev/null; then
+        # Guard against `set -e` + pipefail: wget/grep return non-zero when the
+        # bridge isn't answering HTTP yet. `|| code=""` lets the loop retry.
+        code=$($DC exec -T bridge sh -c \
+            "wget -U 'WAF-bench-preflight' -S -O /dev/null 'http://127.0.0.1:80/index.php' 2>&1 || true" \
+            2>/dev/null | grep -oE 'HTTP/[0-9.]+ [0-9]+' | tail -1 | awk '{print $2}') || code=""
+        if [ -n "$code" ] && [ "$code" != "000" ] && [ "$code" -lt 500 ] 2>/dev/null; then
             return 0
         fi
         sleep 1
@@ -164,56 +156,22 @@ except Exception:
     $DC logs --tail=80 bridge >&2 2>/dev/null || true
     echo "--- php-fpm logs (tail 30) ---" >&2
     $DC logs --tail=30 php-fpm >&2 2>/dev/null || true
-    echo "--- bridge -> php-fpm connectivity ---" >&2
-    $DC exec -T bridge python3 -c "
-import socket
-try:
-    s = socket.create_connection(('php-fpm', 9000), timeout=5)
-    print('php-fpm:9000 reachable')
-    s.close()
-except Exception as e:
-    print(f'php-fpm:9000 UNREACHABLE: {e!r}')
-" >&2 2>/dev/null || true
-    echo "--- raw HTTP probe (via 127.0.0.1) ---" >&2
-    $DC exec -T bridge python3 -c "
-import urllib.request, urllib.error
-req = urllib.request.Request('http://127.0.0.1:80/index.php',
-                              headers={'User-Agent':'WAF-bench-preflight'})
-try:
-    r = urllib.request.urlopen(req, timeout=5)
-    print(f'status={r.status}')
-    print(r.read(500).decode('latin-1','replace'))
-except urllib.error.HTTPError as e:
-    print(f'status={e.code}')
-    print(e.read(500).decode('latin-1','replace'))
-except Exception as e:
-    print(f'CONNECT FAILED: {e!r}')
-" >&2 2>/dev/null || true
     return 1
 }
 
-# Fetch a URL via the bridge container (python3, always present) and print the
-# final HTTP status code. Must NOT run from the php fpm container when the WAF
-# is enabled its hooks interfere with the checker process's own I/O. The bridge
-# has no WAF and simply proxies to php fpm where the request is inspected.
+# Fetch a URL via the bridge container (busybox wget, present in alpine) and
+# print the final HTTP status code. Must NOT run from the php fpm container when
+# the WAF is enabled its hooks interfere with the checker process's own I/O. The
+# bridge has no WAF and simply proxies to php fpm where the request is inspected.
 #
 # A benign User Agent is sent explicitly rule 1025 blocks automated tool UAs
-# (curl/, wget/, Python-urllib/, ...) which would otherwise false positive the
-# benign pre flight probe to 403 once rules load.
+# (curl/, wget/, ...) which would otherwise false positive the benign pre flight
+# probe to 403 once rules load.
 http_status() {
     local url="$1"
-    $DC exec -T bridge python3 -c "
-import urllib.request, urllib.error
-req = urllib.request.Request('$url',
-                              headers={'User-Agent':'WAF-bench-preflight'})
-try:
-    urllib.request.urlopen(req, timeout=10)
-    print(200)
-except urllib.error.HTTPError as e:
-    print(e.code)
-except Exception:
-    print(0)
-" 2>/dev/null
+    $DC exec -T bridge sh -c \
+        "wget -U 'WAF-bench-preflight' -S -O /dev/null '$url' 2>&1 || true" \
+        | grep -oE 'HTTP/[0-9.]+ [0-9]+' | tail -1 | awk '{print $2}'
 }
 
 # Verify the active scenario behaves correctly before benchmarking it
@@ -489,7 +447,7 @@ cmd_up() {
     ensure_stack
     # Recreate the HTTP front-end (bridge) container if its image changed
     # (compose detects the image hash and recreates; otherwise a no-op). Source
-    # edits to fastcgi_bridge.py require a recreate to take effect.
+    # edits to bridge/main.go require a recreate to take effect.
     if ! $DC up -d bridge; then
         echo "docker compose up (bridge) failed" >&2
         return 1
