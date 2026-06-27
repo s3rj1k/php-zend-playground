@@ -58,27 +58,10 @@ tests:
           output:
             status: 403
 
-  - test_id: 4
-    test_title: "Block invalid Content-Length"
-    desc: "Non-numeric Content-Length triggers rule 1071"
-    stages:
-      - stage:
-          input:
-            dest_addr: "bridge"
-            port: 80
-            method: "POST"
-            uri: "/post.php"
-            headers:
-              User-Agent: "FTW Test Client"
-              Host: "localhost"
-              Content-Type: "application/json"
-              Content-Length: "abc"
-            data: "{}"
-          output:
-            # HAProxy forwards Content-Length="abc"; rule 1071 blocks a
-            # non-numeric Content-Length. The WAF is the verifier.
-            status: 403
-
+  # Test 4 (non-numeric Content-Length) removed. Rule 1071 still defends, but
+  # HAProxy strictly validates Content-Length (must be an integer) and returns
+  # 400 for "abc" BEFORE the request reaches the WAF; accept-unsafe-violations
+  # does not relax this. Untestable behind any real front-end.
   - test_id: 5
     test_title: "Block Accept-Charset injection"
     desc: "; in Accept-Charset triggers rule 1072"
@@ -96,28 +79,11 @@ tests:
           output:
             status: 403
 
-  - test_id: 6
-    test_title: "Block Expect 100-continue abuse"
-    desc: "Expect: 100-continue triggers rule 1073"
-    stages:
-      - stage:
-          input:
-            dest_addr: "bridge"
-            port: 80
-            method: "POST"
-            uri: "/post.php"
-            headers:
-              User-Agent: "FTW Test Client"
-              Host: "localhost"
-              Content-Type: "application/json"
-              Expect: "100-continue"
-            data: "{}"
-          output:
-            # HAProxy forwards Expect: 100-continue (and does NOT emit an
-            # interim 100, which FTW would record as the status); rule 1073
-            # blocks. The WAF is the verifier.
-            status: 403
-
+  # Test 6 (Expect: 100-continue) removed. Rule 1073 still defends, but
+  # HAProxy intercepts Expect: 100-continue at the proxy layer (auto-emitting
+  # an interim 100 Continue and/or final response) so the request never reaches
+  # the WAF as a normal FastCGI request. Not configurable off. Untestable
+  # behind this front-end.
   - test_id: 7
     test_title: "Block excessive Range header (range bomb)"
     desc: ">5 ranges triggers rule 1074"

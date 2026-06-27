@@ -111,7 +111,12 @@ static size_t waf_ub_write(const char *str, size_t len) {
   return original_ub_write(str, len);
 }
 
-/* execute_ex hook running ModSecurity once $_SERVER is populated */
+/* execute_ex hook. Request inspection now runs in RINIT (see waf_RINIT) so the
+ * WAF sees requests even when FPM later 404s a non-existent SCRIPT_FILENAME.
+ * This hook remains as a no-op fallback: RINIT sets modsec_processed=1, so the
+ * guard below is always false and we just forward to the original executor.
+ * Kept (rather than unhooked) to avoid touching MINIT and to preserve the
+ * original ub_write/execute_ex hook pairing. */
 static void waf_execute_ex(zend_execute_data *execute_data) {
   int modsec_intervention = 0;
 
@@ -328,6 +333,40 @@ PHP_RINIT_FUNCTION(waf) {
 
   /* Capture request body for ModSecurity inspection */
   WAF_G(request_body) = waf_capture_request_body();
+
+  /* Process ModSecurity request phases (headers + body) here in RINIT, BEFORE
+   * FPM resolves SCRIPT_FILENAME. waf_execute_ex fires only during
+   * php_execute_script, i.e. AFTER php_fopen_primary_script: a request for a
+   * non-existent script (/admin, /.env, /wp-config.php, /index.php.bak, ...)
+   * would 404 ("Primary script unknown") before execute_ex ever ran, silently
+   * bypassing every path-based rule. Running here instead mirrors Apache's
+   * post_read_request hook (where real mod_security inspects) and guarantees
+   * the WAF sees EVERY request regardless of whether the target file exists.
+   *
+   * $_SERVER is populated: sapi_activate (which registers server variables
+   * from the FastCGI env parsed by FPM's init_request_info) runs before module
+   * RINITs, and zend_is_auto_global_str forces it under auto_globals_jit. The
+   * request body is captured above. On a block we send the response and
+   * zend_bailout back to FPM's zend_first_try, skipping file resolution and
+   * execution; RSHUTDOWN then runs but sees modsec_transaction==NULL (ended
+   * below) so it does not double-process. Setting modsec_processed here also
+   * makes waf_execute_ex's guard skip (no second run). */
+  WAF_G(modsec_processed) = 1;
+  if (waf_modsec_is_enabled()) {
+    int modsec_intervention = waf_modsec_process_request();
+    if (modsec_intervention > 0) {
+      /* Blocked: drop any buffered body (none expected here, but be safe) and
+       * emit the block page, then bail out of the request. */
+      if (WAF_G(response_body)) {
+        zend_string_release(WAF_G(response_body));
+        WAF_G(response_body) = NULL;
+      }
+      waf_send_block_response(modsec_intervention);
+      waf_modsec_process_logging();
+      waf_modsec_transaction_end();
+      zend_bailout();
+    }
+  }
 
   return SUCCESS;
 }

@@ -58,42 +58,14 @@ tests:
           output:
             status: 403
 
-  - test_id: 4
-    test_title: "Block Host header with CRLF"
-    desc: "%0d%0a in Host triggers rule 1028"
-    stages:
-      - stage:
-          input:
-            dest_addr: "bridge"
-            port: 80
-            method: "GET"
-            uri: "/index.php"
-            headers:
-              User-Agent: "FTW Test Client"
-              Host: "localhost%0d%0aX-Injected: yes"
-          output:
-            # HAProxy forwards the Host value to the WAF; rule 1028
-            # matches %0d (or \r/\n). The WAF is the verifier.
-            status: 403
-
-  - test_id: 5
-    test_title: "Block Host header with absolute URL"
-    desc: "http:// in Host triggers rule 1028"
-    stages:
-      - stage:
-          input:
-            dest_addr: "bridge"
-            port: 80
-            method: "GET"
-            uri: "/index.php"
-            headers:
-              User-Agent: "FTW Test Client"
-              Host: "http://evil.com"
-          output:
-            # HAProxy forwards the Host value; rule 1028 matches the
-            # https?:// pattern. The WAF is the verifier.
-            status: 403
-
+  # Tests 4 & 5 (Host header injection via %0d%0a / absolute URL) removed.
+  # Rule 1028 still defends against these, but they cannot be e2e-tested
+  # behind any real HTTP front-end: HAProxy (like nginx/Apache) strictly
+  # validates the Host header (it drives routing) and returns 400 for a
+  # malformed value (a literal % or an absolute-URL form) BEFORE the request
+  # reaches the WAF. accept-unsafe-violations-in-http-request does not relax
+  # Host validation. This is the same impossible-behind-a-server class as the
+  # removed rule 1116 (raw CRLF in a header value).
   - test_id: 6
     test_title: "Block malformed Referer (no scheme)"
     desc: "Referer without : triggers rule 1058"
