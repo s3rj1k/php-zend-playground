@@ -175,20 +175,54 @@ class FpmPool:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return sock
 
+    @staticmethod
+    def _healthy(sock: socket.socket) -> bool:
+        """Cheap health check for a pooled (idle) socket.
+
+        A kept-alive socket may have been closed by FPM (e.g. after a php-fpm
+        restart, or pm.max_requests/idle-timeout reaping) without the bridge
+        noticing. Reusing it produces a spurious 502. Probe with a non-blocking
+        MSG_PEEK: a healthy idle socket has no pending data and is not at EOF,
+        so recv raises BlockingIOError. If recv returns b"" the peer closed
+        (stale); if it returns bytes there's leftover/misaligned data (also
+        discard). This is one syscall and eliminates stale-reuse flakiness.
+        """
+        try:
+            sock.setblocking(False)
+            try:
+                data = sock.recv(1, socket.MSG_PEEK)
+            finally:
+                sock.setblocking(True)
+                sock.settimeout(READ_TIMEOUT)
+            # data == b""  -> EOF, peer closed. data with bytes -> leftover.
+            return not data
+        except (BlockingIOError, InterruptedError):
+            # No data pending and not at EOF: the socket is alive and idle.
+            return True
+        except (OSError,):
+            # Any other error (e.g. EBADF): treat as dead.
+            return False
+
     def acquire(self) -> socket.socket:
         """Get a socket to talk to FPM on. May be reused (pooled) or fresh.
 
-        Invariant: _open counts IN-FLIGHT sockets (checked out, not idle).
-        acquire always +1; release/discard always -1. The cap is _open < max.
-        The caller validates by use: a stale pooled socket may raise on the first
-        send/recv; the caller retries once via fcgi_request.
+        Pooled sockets are health-checked (_healthy) before reuse; a stale one
+        (FPM closed it) is discarded and we try the next / open fresh. This is
+        what makes the pool robust to php-fpm restarts without spurious 502s.
         """
-        # Fast path: grab an idle socket if one is pooled.
+        # Try pooled sockets first; discard any that fail the health check.
         with self._cond:
-            if self._idle:
+            while self._idle:
                 sock = self._idle.pop()
-                self._open += 1
-                return sock
+                if self._healthy(sock):
+                    self._open += 1
+                    return sock
+                # Stale: close it (no _open adjustment — it was idle, not in-flight)
+                # and free capacity implicitly by not re-counting it.
+                try:
+                    sock.close()
+                except OSError:
+                    pass
             if self._open < self.max:
                 self._open += 1
                 need_open = True
@@ -203,13 +237,22 @@ class FpmPool:
                     self._open -= 1
                     self._cond.notify()
                 raise
-        # At capacity: wait for a release to hand back an idle socket.
+        # At capacity: wait for a release to hand back an idle socket, then
+        # health-check it (a releaser only returns successful sockets, but the
+        # peer may have closed it in the meantime).
         with self._cond:
-            while not self._idle:
-                self._cond.wait()
-            sock = self._idle.pop()
-            self._open += 1
-            return sock
+            while True:
+                while not self._idle:
+                    self._cond.wait()
+                sock = self._idle.pop()
+                if self._healthy(sock):
+                    self._open += 1
+                    return sock
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                # loop: try the next idle socket or wait again.
 
     def release(self, sock: socket.socket):
         """Return a healthy socket to the pool for reuse, else close it."""
@@ -639,6 +682,12 @@ def handle(conn, addr, pool: FpmPool):
                     "[bridge] php-fpm stderr: "
                     + stderr.decode("latin-1", "replace") + "\n")
             if not stdout:
+                # FPM returned a well-formed FastCGI response (no exception)
+                # but with empty STDOUT. This should not happen for normal
+                # requests; log it with the request so it's diagnosable
+                # (previously this was a silent 502).
+                sys.stderr.write(
+                    f"[bridge] empty FPM stdout for {method} {target}\n")
                 conn.sendall(_BAD_GATEWAY)
                 return
             conn.sendall(build_http_response(stdout, keep_alive=not close_after))

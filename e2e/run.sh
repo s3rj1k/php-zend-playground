@@ -239,12 +239,23 @@ preflight() {
     esac
 }
 
-# Dump diagnostics (php fpm logs + modsec logs) to the scenario detail file when
-# a pre flight fails, so the root cause is visible without a rerun.
+# Dump diagnostics (bridge + php fpm + modsec logs) to the scenario detail file
+# when a pre flight fails, so the root cause is visible without a rerun. The
+# bridge logs are essential: a 502 with empty/no audit transaction means the
+# request never completed in FPM, and only the bridge logs show the actual
+# exception (stale conn, upstream error, etc.).
 dump_preflight_diagnostics() {
     local scenario="$1" detail="$2"
     {
         echo "**Pre-flight FAILED: ${PREFLIGHT_FAIL}**"
+        echo
+        echo "<details><summary>bridge logs (tail)</summary>"
+        echo
+        echo '```'
+        $DC logs --tail=80 bridge 2>&1 || true
+        echo '```'
+        echo
+        echo "</details>"
         echo
         echo "<details><summary>php-fpm logs (tail)</summary>"
         echo
