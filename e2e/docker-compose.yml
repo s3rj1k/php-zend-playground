@@ -18,8 +18,8 @@ services:
 
   # HTTP front-end. HAProxy configured as a lenient HTTP -> FastCGI proxy that
   # forwards requests to php-fpm WITHOUT the security checks a stricter server
-  # would perform mid-stream (accept-invalid-http-request passes forbidden
-  # header chars, h1-accept-payload-with-any-method allows GET-with-body, and
+  # would perform mid-stream (accept-unsafe-violations-in-http-request passes
+  # forbidden header chars, h1-accept-payload-with-any-method allows GET-with-body, and
   # HAProxy forwards both Content-Length and Transfer-Encoding so CL+TE
   # smuggling reaches the WAF). The WAF (inside php-fpm) is the verifier for
   # every rule. See etc/haproxy/haproxy.cfg and AGENTS.md "HTTP front-end".
