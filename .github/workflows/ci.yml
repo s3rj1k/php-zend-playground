@@ -1,6 +1,6 @@
 name: ci
 
-# Pipeline against the HTTP bridge + php fpm (waf extension) stack in e2e/. Each
+# Pipeline against the HAProxy + php fpm (waf extension) stack in e2e/. Each
 # stage gates the next so a broken extension never reaches compile, e2e, or
 # bench. Triggers on push to main and on PRs to main.
 #

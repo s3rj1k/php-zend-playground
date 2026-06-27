@@ -1,12 +1,12 @@
 name: waf
 
-# Shared HTTP bridge + php fpm (waf extension) stack. php fpm mounts a writable
+# Shared HAProxy + php fpm (waf extension) stack. php fpm mounts a writable
 # ./runtime/ directory whose layout mirrors the in container config paths
 # (usr/local/etc/php/conf.d/zz-waf.ini, etc/modsecurity/rules.conf, etc/modsecurity/crs),
 # so run.sh can swap scenarios (or seed the FTW config) without rebuilding.
-# The `bridge` service is a lenient HTTP -> FastCGI bridge (Go, see
-# bridge/main.go), NOT a web server; it serves the PHP endpoints in
-# ./var/www/html and proxies to php-fpm.
+# The `bridge` service is HAProxy configured as a lenient HTTP -> FastCGI
+# front-end (see etc/haproxy/haproxy.cfg); it forwards to php-fpm where the WAF
+# extension runs.
 #
 # Two optional services run against this stack via compose profiles
 #   profile test   FTW + raw socket test runner (Dockerfile.ftw)
@@ -16,20 +16,20 @@ name: waf
 
 services:
 
-  # HTTP front-end. A lenient HTTP -> FastCGI bridge (Go, bridge/main.go) that
-  # forwards raw request bytes to php-fpm WITHOUT the security checks a real
-  # web server used to perform (Host validation, URI %00 decoding, TRACE/CONNECT
-  # hardcoding, non-numeric CL rejection, interim 100-continue, /.ht deny,
-  # missing-.php 404s). The WAF (inside php-fpm) is now the verifier for every
-  # rule. See AGENTS.md "HTTP front-end is a dumb bridge".
+  # HTTP front-end. HAProxy configured as a lenient HTTP -> FastCGI proxy that
+  # forwards requests to php-fpm WITHOUT the security checks a stricter server
+  # would perform mid-stream (accept-invalid-http-request passes forbidden
+  # header chars, h1-accept-payload-with-any-method allows GET-with-body, and
+  # HAProxy forwards both Content-Length and Transfer-Encoding so CL+TE
+  # smuggling reaches the WAF). The WAF (inside php-fpm) is the verifier for
+  # every rule. See etc/haproxy/haproxy.cfg and AGENTS.md "HTTP front-end".
   bridge:
-    build:
-      context: .
-      dockerfile: Dockerfile.bridge
+    image: haproxy:3.4-alpine
     container_name: waf_bridge
     depends_on:
       - php-fpm
     volumes:
+      - ./etc/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - ./var/www/html:/var/www/html:ro
     ports:
       - '127.0.0.1:8080:80'

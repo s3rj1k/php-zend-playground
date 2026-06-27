@@ -55,7 +55,7 @@ tests:
               User-Agent: "FTW Test Client"
               Host: "localhost"
           output:
-            # The bridge forwards REQUEST_METHOD=CONNECT; rule 1057 blocks.
+            # HAProxy forwards REQUEST_METHOD=CONNECT; rule 1057 blocks.
             # The WAF is the verifier.
             status: 403
 

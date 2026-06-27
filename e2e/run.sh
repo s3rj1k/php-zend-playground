@@ -445,9 +445,9 @@ cmd_up() {
     # fresh with the enabled rules config (debug on for FTW diagnosis) and warm
     # up php fpm.
     ensure_stack
-    # Recreate the HTTP front-end (bridge) container if its image changed
-    # (compose detects the image hash and recreates; otherwise a no-op). Source
-    # edits to bridge/main.go require a recreate to take effect.
+    # Recreate the HTTP front-end (bridge = HAProxy) container if its config
+    # changed (compose detects the bind-mount hash and recreates; otherwise a
+    # no-op). HAProxy uses an official image, so there is no build step.
     if ! $DC up -d bridge; then
         echo "docker compose up (bridge) failed" >&2
         return 1

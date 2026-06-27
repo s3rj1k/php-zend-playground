@@ -151,7 +151,7 @@ tests:
 
   #      Rule 1105 HTTP Request Smuggling CL+TE (CRS 920181)
   # The block assertion lives in raw_tests.py (test_request_smuggling_cl_te_*)
-  # because it needs duplicate CL/TE headers. The bridge forwards both headers
+  # because it needs duplicate CL/TE headers. HAProxy forwards both headers
   # and rule 1105 blocks at phase 1 -> 403.
 
   - test_id: 10
@@ -210,7 +210,7 @@ tests:
               Host: "localhost"
               Accept: "*/*"
           output:
-            # The bridge forwards the raw request target (literal "%00" text)
+            # HAProxy forwards the raw request target (literal "%00" text)
             # as REQUEST_URI; rule 1107 matches %00. The WAF is the verifier.
             status: 403
 

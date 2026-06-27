@@ -1,17 +1,24 @@
 """
 Raw HTTP test harness for the PHP WAF.
 
-FTW's YAML schema cannot express duplicate headers or arbitrary raw bytes in
-the request line/headers, so these tests use a raw socket for hand crafted
-HTTP and assert on the response status. They run in the same pytest invocation
-as the FTW YAML tests and target the HTTP bridge > php-fpm stack via FTW_HOST /
-FTW_PORT (default host `bridge`, the lenient FastCGI bridge service).
+FTW's YAML schema cannot express duplicate headers, so these tests use a raw
+socket for hand crafted HTTP and assert on the response status. They run in
+the same pytest invocation as the FTW YAML tests and target the HAProxy >
+php-fpm stack via FTW_HOST / FTW_PORT (default host `bridge`, the HAProxy
+service).
 
 The extension rebuilds REQUEST_HEADERS from $_SERVER, collapsing duplicate
 headers to one scalar, so duplicate headers are tested for graceful handling
-(no crash / no false block), not for a block. Control-byte/smuggling tests
-assert the WAF blocks them (the bridge forwards raw bytes; the WAF is the
-verifier).
+(no crash / no false block), not for a block.
+
+Why raw sockets here (not FTW YAML): a few cases need an empty header value,
+an explicit HTTP/1.0 request line, or a hand-built body that FTW's autocomplete
+would alter. Raw control bytes (bare CR/LF) are NOT tested here anymore: no
+real HTTP front-end (HAProxy included) forwards a raw CR/LF inside a header
+value (RFC 9112 defines CRLF as the header delimiter; HAProxy normalizes
+mid-header line breaks to LWS). Those rules are covered via their percent
+-encoded alternates in the YAML suite (%0d/%0a, which the WAF regex matches
+literally). See AGENTS.md.
 """
 import os
 import socket
@@ -112,41 +119,53 @@ def test_duplicate_content_type_matching_values_handled_gracefully():
 
 
 #
-# Header/request line smuggling via raw control bytes. FTW percent encodes or
-# rejects control chars in header values; raw sockets can inject actual
-# CR/LF. A bare CR (no following LF) inside a header value is malformed and
-# must be rejected (400/403), never reach the application as 200. (A full CRLF
-# is a valid header separator and parses as two clean headers, so it is NOT a
-# rejection case — see the test docstrings.)
+# Header/request line smuggling. A real front-end (HAProxy) parses on CRLF, so
+# a bare CR/LF inside a header value never reaches the WAF as a raw byte — it
+# is normalized to LWS (RFC 9112). These vectors are therefore tested via their
+# percent-encoded alternates in the YAML suite (rule 1028 via %0d in Host,
+# rule 1047 via %0a in ARGS), which the WAF regex matches literally. The one
+# framing vector that DOES survive a real front-end is CL+TE both present:
+# HAProxy forwards both headers (not stripping either), so rule 1105 fires.
 #
 
-def test_host_header_bare_cr_injection_rejected():
-    """A bare CR (not part of a CRLF pair) inside the Host value is blocked.
+def test_request_smuggling_cl_te_rejected():
+    """Rule 1105 (CRS 920181) CL + Transfer Encoding both present.
 
-    The bridge forwards the raw header value to the WAF, so the literal CR in
-    the Host value is matched by rule 1028 (\\r in Host) -> 403.
+    A request carrying both Content-Length and Transfer-Encoding is a request
+    smuggling vector. HAProxy forwards both headers to php-fpm (it does not
+    resolve the ambiguity itself); rule 1105 blocks at phase 1 -> 403.
     """
     raw = (
-        "GET /index.php HTTP/1.1\r\n"
-        "Host: local\rhost\r\n"
+        "POST /index.php HTTP/1.1\r\n"
+        "Host: localhost\r\n"
         "User-Agent: raw-harness\r\n"
+        "Accept: */*\r\n"
+        "Content-Length: 5\r\n"
+        "Transfer-Encoding: chunked\r\n"
         "Connection: close\r\n"
         "\r\n"
+        "x=123"
     ).encode("latin-1")
     status, _, _ = _send_raw(raw)
     assert status == 403, (
-        f"bare CR in Host header should be blocked by rule 1028, got {status}"
+        f"CL+TE smuggling should be blocked by rule 1105, got {status}"
     )
 
 
-def test_literal_newline_in_request_line_rejected():
-    """A literal LF in the request target is blocked.
+#
+# CRLF injection in an argument. Sent percent-encoded (%0a) so it passes
+# HAProxy's request-line parser; the WAF URL-decodes ARGS, so the literal LF
+# is present in the arg value and rule 1047 (CRLF in ARGS) matches -> 403.
+#
 
-    The bridge forwards the raw target as REQUEST_URI/QUERY_STRING; the LF lands
-    in the `q` arg and rule 1047 (CRLF in ARGS, phase 2) matches -> 403.
+def test_lf_injection_in_arg_rejected():
+    """Rule 1047 a percent-encoded LF (%0a) in an arg is blocked.
+
+    HAProxy forwards /index.php?q=line%0ainjection untouched; the WAF decodes
+    ARGS['q'] = "line\\ninjection" and rule 1047 matches -> 403.
     """
     raw = (
-        "GET /index.php?q=line\ninjection HTTP/1.1\r\n"
+        "GET /index.php?q=line%0ainjection HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "User-Agent: raw-harness\r\n"
         "Connection: close\r\n"
@@ -154,45 +173,27 @@ def test_literal_newline_in_request_line_rejected():
     ).encode("latin-1")
     status, _, _ = _send_raw(raw)
     assert status == 403, (
-        f"newline in request line should be blocked by rule 1047, got {status}"
-    )
-
-
-def test_header_bare_cr_smuggling_rejected():
-    """A bare CR inside an arbitrary header value is blocked.
-
-    The bridge forwards the raw header value; rule 1116 (raw CR/LF in any
-    request header) matches -> 403.
-    """
-    raw = (
-        "GET /index.php HTTP/1.1\r\n"
-        "Host: localhost\r\n"
-        "User-Agent: raw-harness\r\n"
-        "X-Custom: val\rsmuggled\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-    ).encode("latin-1")
-    status, _, _ = _send_raw(raw)
-    assert status == 403, (
-        f"bare CR in header value should be blocked by rule 1116, got {status}"
+        f"%0a in arg should be blocked by rule 1047, got {status}"
     )
 
 
 #
-# Raw body with a NUL byte that FTW's YAML cannot carry cleanly. Ensures the
-# WAF/php-fpm pipeline does not crash on control bytes in the body.
+# Raw body with a NUL byte that FTW's YAML cannot carry cleanly. Sent
+# percent-encoded (%00) so it traverses HAProxy as normal form data; PHP/WAF
+# URL-decode it to a real NUL in the arg. Ensures the pipeline does not crash
+# on control bytes in the body.
 #
 
 def test_nul_byte_in_body_does_not_crash():
-    """A NUL byte in the POST body must not crash the pipeline."""
-    body = "data=hello\x00world"
+    """A percent-encoded NUL (%00) in the POST body must not crash the pipeline."""
+    body = "data=hello%00world"
     req = _request("POST", "/post.php", [
         ("Content-Type", "application/x-www-form-urlencoded"),
     ], body=body)
     status, _, _ = _send_raw(req)
     # Only assert no 5xx (server crash) and no hang either 200 or 403 is fine.
     assert status < 500, (
-        f"NUL in body caused server error {status}"
+        f"%00 in body caused server error {status}"
     )
 
 
@@ -252,30 +253,6 @@ def test_http_1_1_protocol_allowed():
     status, _, _ = _send_raw(raw)
     assert status == 200, (
         f"HTTP/1.1 request should be allowed, got {status}"
-    )
-
-
-def test_request_smuggling_cl_te_rejected():
-    """Rule 1105 (CRS 920181) CL + Transfer Encoding both present.
-
-    A request carrying both Content-Length and Transfer-Encoding is a request
-    smuggling vector. The bridge forwards both headers; rule 1105 blocks at
-    phase 1 -> 403.
-    """
-    raw = (
-        "POST /index.php HTTP/1.1\r\n"
-        "Host: localhost\r\n"
-        "User-Agent: raw-harness\r\n"
-        "Accept: */*\r\n"
-        "Content-Length: 5\r\n"
-        "Transfer-Encoding: chunked\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "x=123"
-    ).encode("latin-1")
-    status, _, _ = _send_raw(raw)
-    assert status == 403, (
-        f"CL+TE smuggling should be blocked by rule 1105, got {status}"
     )
 
 

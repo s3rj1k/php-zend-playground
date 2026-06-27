@@ -75,7 +75,7 @@ tests:
               Content-Length: "abc"
             data: "{}"
           output:
-            # The bridge forwards Content-Length="abc"; rule 1071 blocks a
+            # HAProxy forwards Content-Length="abc"; rule 1071 blocks a
             # non-numeric Content-Length. The WAF is the verifier.
             status: 403
 
@@ -113,7 +113,7 @@ tests:
               Expect: "100-continue"
             data: "{}"
           output:
-            # The bridge forwards Expect: 100-continue (and does NOT emit an
+            # HAProxy forwards Expect: 100-continue (and does NOT emit an
             # interim 100, which FTW would record as the status); rule 1073
             # blocks. The WAF is the verifier.
             status: 403

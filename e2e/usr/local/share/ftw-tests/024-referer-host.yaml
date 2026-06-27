@@ -72,7 +72,7 @@ tests:
               User-Agent: "FTW Test Client"
               Host: "localhost%0d%0aX-Injected: yes"
           output:
-            # The bridge forwards the raw Host value to the WAF; rule 1028
+            # HAProxy forwards the Host value to the WAF; rule 1028
             # matches %0d (or \r/\n). The WAF is the verifier.
             status: 403
 
@@ -90,7 +90,7 @@ tests:
               User-Agent: "FTW Test Client"
               Host: "http://evil.com"
           output:
-            # The bridge forwards the raw Host value; rule 1028 matches the
+            # HAProxy forwards the Host value; rule 1028 matches the
             # https?:// pattern. The WAF is the verifier.
             status: 403
 
