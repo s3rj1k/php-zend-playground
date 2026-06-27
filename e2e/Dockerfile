@@ -29,5 +29,9 @@ COPY src/php_waf/php_waf.ini /usr/local/etc/php/conf.d/zz-waf.ini
 
 RUN mkdir -p /etc/modsecurity
 
+# FPM pool tuning (see e2e/etc/php-fpm.d/zz-pool.conf). Bakes a larger
+# pm.max_children into the image so concurrency is not capped at the stock 5.
+COPY e2e/etc/php-fpm.d/zz-pool.conf /usr/local/etc/php-fpm.d/zz-pool.conf
+
 # Verify install
 RUN php -m | grep waf
