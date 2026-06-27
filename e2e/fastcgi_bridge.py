@@ -24,14 +24,20 @@ WHY THIS EXISTS
   original REQUEST_URI so path rules like 1006/1038 still match).
 
 PERFORMANCE
-  The original bridge opened a fresh FastCGI TCP connection per request and
-  spawned a thread per connection — both are real per-request costs that nginx
-  avoids. This version:
-    - keeps a pool of persistent FPM connections (FCGI_KEEP_CONN) and reuses
-      them across requests (one request at a time per socket; php-fpm does not
-      multiplex, so the pool is bounded by worker count);
+  The original bridge spawned a thread per connection — a real per-request cost.
+  This version:
+    - preforks PROCESSES worker processes, each its own GIL + FPM gate, all
+      accepting on one port via SO_REUSEPORT (the kernel spreads connections
+      across processes like nginx). This is the key: one Python GIL caps a
+      single process at ~50% of nginx; N processes use N cores.
+    - opens a FRESH FastCGI connection per request (closed after), with
+      concurrency bounded by an FpmGate so FPM's pm.max_children isn't exceeded.
+      NB: php-fpm's default config does NOT honour FCGI_KEEP_CONN, so a reuse
+      pool produced spurious 502s (RST mid-request) — per-request connect is
+      correct. nginx has the same FPM constraint; its throughput comes from the
+      event/process model, not FPM connection reuse.
     - serves HTTP keep-alive on the client side so oha/FTW reuse one TCP
-      connection for many requests (no handshake per request);
+      connection for many requests (no client-side handshake per request);
     - dispatches connections to a bounded thread pool (no per-request thread
       creation).
   Leniency is UNCHANGED: read_request/resolve_script/build_params are the same
@@ -49,7 +55,6 @@ import sys
 import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from collections import deque
 
 DOC_ROOT = os.environ.get("DOC_ROOT", "/var/www/html")
 FPM_HOST = os.environ.get("FPM_HOST", "php-fpm")
@@ -60,14 +65,15 @@ INDEX_FILE = "index.php"
 
 # Concurrency knobs.
 #   PROCESSES  — number of preforked worker processes. Each has its OWN Python
-#     GIL + FPM pool and accepts on the same port via SO_REUSEPORT (kernel
+#     GIL + FPM gate and accepts on the same port via SO_REUSEPORT (kernel
 #     load-balances accepts, like nginx). This is the key to throughput: one
 #     GIL serialises the CPU-bound parse/build across threads, so a single
 #     process caps out at ~50% of nginx; N processes use N cores and recover
 #     most of the gap. Default = number of CPUs (at least 2).
 #   BRIDGE_WORKERS — threads PER process (overlaps I/O within one GIL).
-#   FPM_POOL_MAX — persistent FPM conns PER process. Total across all processes
-#     must be <= php-fpm pm.max_children, so default scales it down per process.
+#   FPM_POOL_MAX — max IN-FLIGHT FPM conns PER process (a gate, not a pool —
+#     see FpmGate). Total across all processes must be <= php-fpm
+#     pm.max_children, so default scales it down per process.
 PROCESSES = max(1, int(os.environ.get("PROCESSES", str(os.cpu_count() or 2))))
 BRIDGE_WORKERS = int(os.environ.get("BRIDGE_WORKERS", "64"))
 # Keep total FPM conns <= max_children (64 by default, see etc/php-fpm.d).
@@ -145,152 +151,67 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# FPM connection pool (persistent, KEEP_CONN)
+# FPM connection gate (per-request connect; bounded concurrency)
 # ---------------------------------------------------------------------------
+#
+# WHY NOT POOL/KEEP_CONN: php-fpm (default config) does NOT honour
+# FCGI_KEEP_CONN — it closes the FastCGI socket after each request. A pooled
+# socket is therefore always stale on the NEXT reuse; worse, the close often
+# arrives as a RST mid-request (after the bridge already sent BEGIN_REQUEST),
+# surfacing as ECONNRESET and a spurious 502 with lost response bytes. A
+# MSG_PEEK health check can't catch a RST that lands between acquire() and the
+# first sendall. So: open a fresh connection per request (always correct), and
+# bound the number of IN-FLIGHT FPM connections so we don't overwhelm FPM's
+# pm.max_children. This is the same constraint nginx has with default FPM; its
+# throughput comes from its event/process model, not FPM connection reuse.
 
-class FpmPool:
-    """A bounded pool of persistent FastCGI connections to php-fpm.
+class FpmGate:
+    """A bounded gate of in-flight FPM connections (NOT a reuse pool).
 
-    One request uses one socket at a time (php-fpm does not multiplex, so we
-    cannot run two BEGIN_REQUEST in parallel on one socket). acquire() returns
-    a healthy socket (reused if available, else newly opened up to the cap, else
-    it blocks for a free one). release() returns it to the pool; discard()
-    closes it (used on any error — a pooled socket may have been closed by FPM).
-
-    If FPM does not honour FCGI_KEEP_CONN in some build, connections still work
-    per-request: the stale reuse simply fails, the caller retries once with a
-    fresh socket, and the bad socket is discarded. No regression vs the old
-    per-request-connect behaviour.
+    acquire() reserves a slot (blocking at capacity); release() frees it. The
+    caller opens/uses/closes its OWN socket each time. This caps concurrency at
+    `max` without trying to reuse sockets that FPM will have closed.
     """
 
     def __init__(self, max_conns: int):
         self.max = max_conns
-        self._idle: deque[socket.socket] = deque()
-        self._open = 0
+        self._in_flight = 0
         self._cond = threading.Condition()
 
-    def _open_socket(self) -> socket.socket:
-        sock = socket.create_connection((FPM_HOST, FPM_PORT), timeout=READ_TIMEOUT)
-        sock.settimeout(READ_TIMEOUT)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        return sock
-
-    @staticmethod
-    def _healthy(sock: socket.socket) -> bool:
-        """Cheap health check for a pooled (idle) socket.
-
-        A kept-alive socket may have been closed by FPM (e.g. after a php-fpm
-        restart, or pm.max_requests/idle-timeout reaping) without the bridge
-        noticing. Reusing it produces a spurious 502. Probe with a non-blocking
-        MSG_PEEK: a healthy idle socket has no pending data and is not at EOF,
-        so recv raises BlockingIOError. If recv returns b"" the peer closed
-        (stale); if it returns bytes there's leftover/misaligned data (also
-        discard). This is one syscall and eliminates stale-reuse flakiness.
-        """
-        try:
-            sock.setblocking(False)
-            try:
-                data = sock.recv(1, socket.MSG_PEEK)
-            finally:
-                sock.setblocking(True)
-                sock.settimeout(READ_TIMEOUT)
-            # data == b""  -> EOF, peer closed. data with bytes -> leftover.
-            return not data
-        except (BlockingIOError, InterruptedError):
-            # No data pending and not at EOF: the socket is alive and idle.
-            return True
-        except (OSError,):
-            # Any other error (e.g. EBADF): treat as dead.
-            return False
-
-    def acquire(self) -> socket.socket:
-        """Get a socket to talk to FPM on. May be reused (pooled) or fresh.
-
-        Pooled sockets are health-checked (_healthy) before reuse; a stale one
-        (FPM closed it) is discarded and we try the next / open fresh. This is
-        what makes the pool robust to php-fpm restarts without spurious 502s.
-        """
-        # Try pooled sockets first; discard any that fail the health check.
+    def acquire(self):
         with self._cond:
-            while self._idle:
-                sock = self._idle.pop()
-                if self._healthy(sock):
-                    self._open += 1
-                    return sock
-                # Stale: close it (no _open adjustment — it was idle, not in-flight)
-                # and free capacity implicitly by not re-counting it.
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-            if self._open < self.max:
-                self._open += 1
-                need_open = True
-            else:
-                need_open = False
-        if need_open:
-            # Open outside the lock (connect can block).
-            try:
-                return self._open_socket()
-            except OSError:
-                with self._cond:
-                    self._open -= 1
-                    self._cond.notify()
-                raise
-        # At capacity: wait for a release to hand back an idle socket, then
-        # health-check it (a releaser only returns successful sockets, but the
-        # peer may have closed it in the meantime).
+            while self._in_flight >= self.max:
+                self._cond.wait()
+            self._in_flight += 1
+
+    def release(self):
         with self._cond:
-            while True:
-                while not self._idle:
-                    self._cond.wait()
-                sock = self._idle.pop()
-                if self._healthy(sock):
-                    self._open += 1
-                    return sock
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-                # loop: try the next idle socket or wait again.
-
-    def release(self, sock: socket.socket):
-        """Return a healthy socket to the pool for reuse, else close it."""
-        with self._cond:
-            self._open -= 1
-            if len(self._idle) < self.max:
-                self._idle.append(sock)
-                self._cond.notify()
-                return
-        try:
-            sock.close()
-        except OSError:
-            pass
-
-    def discard(self, sock: socket.socket):
-        """Drop a bad socket and free its capacity slot."""
-        try:
-            sock.close()
-        except OSError:
-            pass
-        with self._cond:
-            self._open -= 1
-            self._cond.notify_all()
+            self._in_flight -= 1
+            self._cond.notify()
 
 
-# NOTE: the FPM pool is created per-worker-process in worker_main(), NOT here
-# as a module global — each preforked process must own its own pool (and its
+def _open_fpm_socket() -> socket.socket:
+    sock = socket.create_connection((FPM_HOST, FPM_PORT), timeout=READ_TIMEOUT)
+    sock.settimeout(READ_TIMEOUT)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    return sock
+
+
+# NOTE: the FPM gate is created per-worker-process in worker_main(), NOT here
+# as a module global — each preforked process must own its own gate (and its
 # own GIL). See main()/worker_main().
 
 
-def fcgi_request(pool: FpmPool, params: dict, body: bytes) -> tuple[bytes, bytes]:
-    """Send a request to php-fpm via the pool. Returns (stdout, stderr).
+def fcgi_request(gate: FpmGate, params: dict, body: bytes) -> tuple[bytes, bytes]:
+    """Send one request to php-fpm on a FRESH connection (closed after).
 
-    Retries once on a stale pooled connection (FPM may have closed it).
+    The gate bounds concurrency (acquire/release); the socket itself is
+    per-request, so there is no stale-connection hazard regardless of whether
+    FPM honours FCGI_KEEP_CONN.
     """
     request_id = 1
-    # BEGIN_REQUEST: role RESPONDER, FCGI_KEEP_CONN so the socket is reusable.
-    begin = struct.pack("!HB5x", FCGI_RESPONDER, FCGI_KEEP_CONN)
+    # BEGIN_REQUEST: role RESPONDER, flags=0 (no KEEP_CONN — we close after).
+    begin = struct.pack("!HB5x", FCGI_RESPONDER, 0)
     encoded = _encode_params(params)
     # Pre-build the whole upstream write in one buffer: fewer sendall syscalls.
     out = bytearray()
@@ -303,23 +224,20 @@ def fcgi_request(pool: FpmPool, params: dict, body: bytes) -> tuple[bytes, bytes
     out += _record(FCGI_STDIN, request_id, b"")
     request_bytes = bytes(out)
 
-    last_err: Exception | None = None
-    for attempt in (0, 1):
-        sock = pool.acquire()
-        reused = attempt == 0  # first attempt may use a pooled socket
-        try:
-            sock.sendall(request_bytes)
-            stdout, stderr = _read_response(sock, request_id)
-            pool.release(sock)
-            return stdout, stderr
-        except (socket.timeout, ConnectionError, OSError) as exc:
-            last_err = exc
-            pool.discard(sock)
-            if reused:
-                # Stale pooled connection: retry once with a fresh socket.
-                continue
-            raise
-    raise ConnectionError(f"FastCGI request failed after retry: {last_err!r}")
+    gate.acquire()
+    sock = None
+    try:
+        sock = _open_fpm_socket()
+        sock.sendall(request_bytes)
+        stdout, stderr = _read_response(sock, request_id)
+        return stdout, stderr
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        gate.release()
 
 
 def _read_response(sock: socket.socket, request_id: int) -> tuple[bytes, bytes]:
@@ -656,7 +574,7 @@ _INTERNAL_ERROR = (
 )
 
 
-def handle(conn, addr, pool: FpmPool):
+def handle(conn, addr, gate: FpmGate):
     """Serve one client connection, looping over keep-alive requests."""
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     try:
@@ -670,7 +588,7 @@ def handle(conn, addr, pool: FpmPool):
             try:
                 params = build_params(method, target, version, headers, body,
                                       addr[0], addr[1])
-                stdout, stderr = fcgi_request(pool, params, body)
+                stdout, stderr = fcgi_request(gate, params, body)
             except Exception as exc:
                 # Upstream failure (FPM down / stale conn / timeout). Close the
                 # client connection — keeping it alive would just fail again.
@@ -730,12 +648,12 @@ def worker_main(worker_id: int):
     """One preforked worker process: own GIL, own FPM pool, own thread pool,
     accepting on a SO_REUSEPORT listen socket."""
     srv = _listen_socket()
-    pool = FpmPool(FPM_POOL_MAX)
+    pool = FpmGate(FPM_POOL_MAX)
     executor = ThreadPoolExecutor(max_workers=BRIDGE_WORKERS,
                                   thread_name_prefix=f"bridge-{worker_id}")
     sys.stderr.write(
         f"[bridge:{os.getpid()}] worker {worker_id} up, "
-        f"threads={BRIDGE_WORKERS}, fpm_pool={FPM_POOL_MAX}\n")
+        f"threads={BRIDGE_WORKERS}, fpm_gate={FPM_POOL_MAX}\n")
     while True:
         conn, addr = srv.accept()
         executor.submit(handle, conn, addr, pool)
