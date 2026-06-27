@@ -54,12 +54,30 @@ var (
 	// Cap in-flight FPM dials so we don't exceed pm.max_children. Default 64
 	// (see etc/php-fpm.d/zz-pool.conf). Set FPM_TOTAL to match max_children.
 	fpmTotal = atoiDefault(getenv("FPM_TOTAL", "64"), 64)
+
+	// Pre-computed once at startup (were recomputed per request):
+	//   fpmAddr     — net.JoinHostPort(fpmHost, fpmPort)
+	//   absRoot     — filepath.Abs(docRoot) (+ trailing separator for prefix test)
+	//   indexScript — filepath.Join(docRoot, indexFile) (the front-controller)
+	fpmAddr     = net.JoinHostPort(fpmHost, fpmPort)
+	absRoot     = absRootForDocRoot()
+	indexScript = filepath.Join(docRoot, indexFile)
 )
+
+// absRootForDocRoot returns the absolute docroot with a trailing separator so
+// the escape check in resolveScript is a single strings.HasPrefix (no per-request
+// allocation of separator concatenation).
+func absRootForDocRoot() string {
+	a, err := filepath.Abs(docRoot)
+	if err != nil {
+		a = docRoot
+	}
+	return a + string(filepath.Separator)
+}
 
 const (
 	readTimeoutSec = 60
 	recvBuf        = 65536
-	listenBacklog  = 1024
 )
 
 // fpmGate caps in-flight FastCGI connections (a semaphore, NOT a pool — see the
@@ -234,15 +252,15 @@ func resolveScript(target string) (string, string) {
 	}
 	rel := strings.TrimLeft(path, "/")
 	candidate := filepath.Join(docRoot, filepath.Clean("/"+rel))
-	// Ensure the candidate did not escape docRoot.
-	absRoot, _ := filepath.Abs(docRoot)
-	if !strings.HasPrefix(candidate+string(filepath.Separator), absRoot+string(filepath.Separator)) && candidate != absRoot {
-		return filepath.Join(docRoot, indexFile), path
+	// Ensure the candidate did not escape docRoot. absRoot already has a
+	// trailing separator, so HasPrefix(candidate, absRoot) is the escape test.
+	if !strings.HasPrefix(candidate+string(filepath.Separator), absRoot) {
+		return indexScript, path
 	}
 	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 		return candidate, path
 	}
-	return filepath.Join(docRoot, indexFile), path
+	return indexScript, path
 }
 
 // buildParams constructs the FastCGI (CGI/1.1) params map from the raw request.
@@ -254,53 +272,55 @@ func buildParams(method, target, version string, headers [][2]string, body []byt
 	if i := strings.IndexByte(target, '?'); i >= 0 {
 		pathOnly, query = target[:i], target[i+1:]
 	}
-	serverName := headerVal(headers, "host")
-	if serverName == "" {
-		serverName = "localhost"
-	}
+	serverName := "localhost"
+	// Single pass over headers: collect HTTP_* params, and capture the special
+	// CGI headers (Host/Content-Type/Content-Length) without re-scanning.
+	// Pre-size to the worst case (static keys + 1 per header) to avoid rehash.
+	p := make(map[string]string, 16+len(headers))
+	p["GATEWAY_INTERFACE"] = "CGI/1.1"
+	p["SERVER_PROTOCOL"] = version
+	p["SERVER_SOFTWARE"] = "waf-bridge/2.0"
+	p["REQUEST_METHOD"] = method
+	p["REQUEST_URI"] = target // raw, undecoded, incl. query string
+	p["QUERY_STRING"] = query
+	p["DOCUMENT_ROOT"] = docRoot
+	p["DOCUMENT_URI"] = pathOnly
+	p["SCRIPT_NAME"] = scriptName
+	p["SCRIPT_FILENAME"] = scriptFilename
+	p["REMOTE_ADDR"] = clientAddr
+	p["REMOTE_PORT"] = clientPort
+	p["SERVER_ADDR"] = "127.0.0.1"
+	p["SERVER_PORT"] = listenPort
+	p["REDIRECT_STATUS"] = "200" // required by php-fpm security model
 
-	p := map[string]string{
-		"GATEWAY_INTERFACE": "CGI/1.1",
-		"SERVER_PROTOCOL":   version,
-		"SERVER_SOFTWARE":   "waf-bridge/2.0",
-		"REQUEST_METHOD":    method,
-		"REQUEST_URI":       target, // raw, undecoded, incl. query string
-		"QUERY_STRING":      query,
-		"DOCUMENT_ROOT":     docRoot,
-		"DOCUMENT_URI":      pathOnly,
-		"SCRIPT_NAME":       scriptName,
-		"SCRIPT_FILENAME":   scriptFilename,
-		"REMOTE_ADDR":       clientAddr,
-		"REMOTE_PORT":       clientPort,
-		"SERVER_ADDR":       "127.0.0.1",
-		"SERVER_PORT":       listenPort,
-		"SERVER_NAME":       serverName,
-		"REDIRECT_STATUS":   "200", // required by php-fpm security model
-	}
-
-	if ct := headerVal(headers, "content-type"); ct != "" {
-		p["CONTENT_TYPE"] = ct
-	}
-	if cl := headerVal(headers, "content-length"); cl != "" {
-		p["CONTENT_LENGTH"] = cl
-	} else if len(body) > 0 {
-		p["CONTENT_LENGTH"] = strconv.Itoa(len(body))
-	}
-
-	// All other headers -> HTTP_<NAME> (dashes -> underscores, uppercased).
-	// Duplicates joined with ", " (CGI/1.1 convention).
-	grouped := map[string][]string{}
-	order := []string{}
+	var clHeader string
+	// group order for duplicate HTTP_* headers (CGI/1.1 joins with ", ").
+	grouped := make(map[string][]string, len(headers))
+	order := make([]string, 0, len(headers))
 	for _, h := range headers {
 		name := strings.ToLower(h[0])
-		if name == "content-type" || name == "content-length" {
+		switch name {
+		case "content-type":
+			p["CONTENT_TYPE"] = h[1]
 			continue
+		case "content-length":
+			clHeader = h[1]
+			continue
+		case "host":
+			serverName = h[1]
 		}
 		key := "HTTP_" + strings.ToUpper(strings.ReplaceAll(h[0], "-", "_"))
 		if _, seen := grouped[key]; !seen {
 			order = append(order, key)
 		}
 		grouped[key] = append(grouped[key], h[1])
+	}
+	p["SERVER_NAME"] = serverName
+
+	if clHeader != "" {
+		p["CONTENT_LENGTH"] = clHeader
+	} else if len(body) > 0 {
+		p["CONTENT_LENGTH"] = strconv.Itoa(len(body))
 	}
 	for _, key := range order {
 		p[key] = strings.Join(grouped[key], ", ")
@@ -334,8 +354,7 @@ func fpmRequest(params map[string]string, body []byte) ([]byte, []byte, error) {
 	fpmGate <- struct{}{}
 	defer func() { <-fpmGate }()
 
-	addr := net.JoinHostPort(fpmHost, fpmPort)
-	fcgi, err := fcgiclient.DialTimeout("tcp", addr, time.Duration(readTimeoutSec)*time.Second)
+	fcgi, err := fcgiclient.DialTimeout("tcp", fpmAddr, time.Duration(readTimeoutSec)*time.Second)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fcgi dial: %w", err)
 	}
@@ -369,6 +388,9 @@ var (
 // header and forces a correct Content-Length so the client can frame the next
 // request. The CGI "Status:" header (e.g. "403 Forbidden") becomes the HTTP
 // status line; it is not re-emitted as a response header.
+//
+// PERF: avoids fmt.Fprintf (reflection + format parse) by building the status
+// line and Content-Length with strconv.AppendInt / direct WriteString.
 func writeHTTPResponse(w io.Writer, stdout []byte, keepAlive bool) error {
 	sep := bytes.Index(stdout, []byte("\r\n\r\n"))
 	var head, body []byte
@@ -420,16 +442,23 @@ func writeHTTPResponse(w io.Writer, stdout []byte, keepAlive bool) error {
 	}
 
 	var buf bytes.Buffer
-	if statusText != "" {
-		fmt.Fprintf(&buf, "HTTP/1.1 %d %s\r\n", statusCode, statusText)
-	} else {
-		fmt.Fprintf(&buf, "HTTP/1.1 %d\r\n", statusCode)
-	}
+
+	// Status line: "HTTP/1.1 <code> <text>\r\n" — built without fmt.
+	buf.WriteString("HTTP/1.1 ")
+	buf.Write(strconv.AppendInt(buf.AvailableBuffer(), int64(statusCode), 10))
+	buf.WriteByte(' ')
+	buf.WriteString(statusText)
+	buf.WriteString("\r\n")
 	for _, h := range outHeaders {
-		fmt.Fprintf(&buf, "%s: %s\r\n", h[0], h[1])
+		buf.WriteString(h[0])
+		buf.WriteString(": ")
+		buf.WriteString(h[1])
+		buf.WriteString("\r\n")
 	}
 	if !haveCL {
-		fmt.Fprintf(&buf, "Content-Length: %d\r\n", len(body))
+		buf.WriteString("Content-Length: ")
+		buf.Write(strconv.AppendInt(buf.AvailableBuffer(), int64(len(body)), 10))
+		buf.WriteString("\r\n")
 	}
 	if keepAlive {
 		buf.WriteString("Connection: keep-alive\r\n\r\n")
@@ -445,8 +474,9 @@ func writeHTTPResponse(w io.Writer, stdout []byte, keepAlive bool) error {
 // output has no header terminator).
 func writeRaw(w io.Writer, stdout []byte, keepAlive bool) error {
 	var buf bytes.Buffer
-	buf.WriteString("HTTP/1.1 200 OK\r\n")
-	fmt.Fprintf(&buf, "Content-Length: %d\r\n", len(stdout))
+	buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: ")
+	buf.Write(strconv.AppendInt(buf.AvailableBuffer(), int64(len(stdout)), 10))
+	buf.WriteString("\r\n")
 	if keepAlive {
 		buf.WriteString("Connection: keep-alive\r\n\r\n")
 	} else {
@@ -484,6 +514,11 @@ func handle(conn net.Conn) {
 	}
 	br := bufio.NewReaderSize(conn, recvBuf)
 
+	// Client addr/port are constant for the connection; compute once, not per
+	// keep-alive request. Avoids RemoteAddr().String() + SplitHostPort (string
+	// parse + alloc) per request.
+	clientAddr, clientPort := connAddr(conn.RemoteAddr())
+
 	for {
 		method, target, version, headers, body, ok := readRequest(br)
 		if !ok {
@@ -491,7 +526,6 @@ func handle(conn net.Conn) {
 		}
 		closeAfter := wantsClose(version, headers)
 
-		clientAddr, clientPort := splitAddr(conn.RemoteAddr().String())
 		params := buildParams(method, target, version, headers, body, clientAddr, clientPort)
 
 		stdout, _, err := fpmRequest(params, body)
@@ -510,11 +544,15 @@ func handle(conn net.Conn) {
 	}
 }
 
-// splitAddr splits "host:port" into (host, port).
-func splitAddr(a string) (string, string) {
-	host, port, err := net.SplitHostPort(a)
+// connAddr returns (ip, port) from a net.Addr without stringifying+parsing.
+// Falls back to the raw address string if the concrete type is unknown.
+func connAddr(a net.Addr) (string, string) {
+	if ta, ok := a.(*net.TCPAddr); ok {
+		return ta.IP.String(), strconv.Itoa(ta.Port)
+	}
+	host, port, err := net.SplitHostPort(a.String())
 	if err != nil {
-		return a, "0"
+		return a.String(), "0"
 	}
 	return host, port
 }
